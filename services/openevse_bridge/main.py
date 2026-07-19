@@ -135,8 +135,14 @@ def control_command(
 
     claim_topic = f"{base}/claim/set"
     override_topic = f"{base}/override/set"
+    divert_topic = f"{base}/divertmode/set"
     active = json.dumps(
-        {"state": "active", "charge_current": amps, "auto_release": auto_release},
+        {
+            "state": "active",
+            "charge_current": amps,
+            "max_current": amps,
+            "auto_release": auto_release,
+        },
         separators=(",", ":"),
     )
     disabled = _stop_payload("disabled", auto_release=auto_release)
@@ -145,15 +151,28 @@ def control_command(
         if stop_mode == "release" or stop_mode == "clear":
             return [(claim_topic, "release"), (override_topic, "clear")]
         # Hold both channels disabled so neither Auto/Eco nor a stale claim/override
-        # can resume at I_min.
-        return [(claim_topic, disabled), (override_topic, disabled)]
+        # can resume at I_min. Also force divert Normal so Eco cannot re-claim at 6A.
+        return [
+            (divert_topic, "1"),
+            (claim_topic, disabled),
+            (override_topic, disabled),
+        ]
 
     if mode == "claim":
-        # Drop Manual override so it cannot fight the automation claim.
-        return [(override_topic, "clear"), (claim_topic, active)]
+        # Normal divert (1): Eco divert can claim at Priority_Limit (1100) and beat
+        # MQTT (500), leaving SETPOINT stuck at ~6A despite Max Current 32.
+        return [
+            (divert_topic, "1"),
+            (override_topic, "clear"),
+            (claim_topic, active),
+        ]
 
     # override: drop MQTT claim so the UI mqtt badge cannot stick at 6 A.
-    return [(claim_topic, "release"), (override_topic, active)]
+    return [
+        (divert_topic, "1"),
+        (claim_topic, "release"),
+        (override_topic, active),
+    ]
 
 
 class OpenEvseBridge:

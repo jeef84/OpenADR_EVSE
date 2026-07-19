@@ -52,6 +52,8 @@ Bridge hardware mapping (`OPENEVSE_CONTROL`, default `claim`; base topic default
 
 Stop always quiets **both** claim and override so a leftover MQTT claim cannot hold the 6 A floor after an override-only clear (the failure mode behind a persistent UI `mqtt` badge at 6 A).
 
+FLEX also publishes `{base}/divertmode/set` → `1` (Normal) on charge/stop. OpenEVSE **Eco divert** can claim at priority 1100 and beat MQTT (500), which leaves **SETPOINT at ~6 A** while **Max Current** stays 32 A. This OpenEVSE is FLEX-owned; leave gateway divert on Normal / Fast, not Eco. Enphase Soleil can still do solar follow on its own charger.
+
 The bridge ignores **retained** `openevse/cmd/current_limit` (HA convenience retain); only live VEN publishes change hardware. That avoids a brief stale 32 A pulse on bridge reconnect.
 
 `OPENEVSE_STOP_MODE=disabled` (default) keeps FLEX ownership while forcing sleep. `release` / `clear` yields both channels to Auto/Eco and can leave the EVSE charging at the 6 A floor.
