@@ -4,7 +4,7 @@
 # Does NOT command the EVSE directly (VEN + openevse_bridge own amps).
 #
 # Hardware path:
-#   VEN -> openevse/cmd/current_limit -> services/openevse_bridge (MQTT RAPI)
+#   VEN -> openevse/cmd/current_limit -> services/openevse_bridge (claim/override MQTT)
 #
 # ---------------------------------------------------------------------------
 # SITE CONFIG — edit these entity_ids to match your Home Assistant instance

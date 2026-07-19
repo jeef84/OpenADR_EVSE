@@ -11,7 +11,7 @@ HA telemetry/controls -> Mosquitto -> tariff engine -> VTN -> VEN
                                          openevse/cmd/current_limit
                                                       |
                                                       v
-                                         openevse_bridge (MQTT RAPI $FS / $FC / $SC)
+                                         openevse_bridge (claim/override MQTT; optional RAPI)
                                                       |
                                                       v
                                                    OpenEVSE
@@ -43,12 +43,20 @@ control paths isolated so two automations do not fight over the same EVSE.
 | `openevse/status/applied_current_limit` | bridge → HA | Last applied setpoint |
 | `openevse/status/connected` | bridge → HA | Vehicle/EVSE session connected |
 
-Bridge RAPI mapping (configurable base topic, default `openevse`):
+Bridge hardware mapping (`OPENEVSE_CONTROL`, default `claim`; base topic default `openevse`):
 
-| Commanded amps | MQTT RAPI |
-| --- | --- |
-| 0 (or 1–5 / invalid) | `{base}/rapi/in/$FS` |
-| ≥ 6 | `{base}/rapi/in/$FC` then `{base}/rapi/in/$SC {n}` |
+| Commanded amps | `claim` (default) | `override` | `rapi` (legacy) |
+| --- | --- | --- | --- |
+| 0 (or 1–5 / invalid) | disable **both** `{base}/claim/set` and `{base}/override/set` with `{"state":"disabled",…}` | same dual disable | `{base}/rapi/in/$FS` |
+| ≥ 6 | clear override, then claim `active` + amps | release claim, then override `active` + amps | `$FC` then `$SC {n}` |
+
+Stop always quiets **both** claim and override so a leftover MQTT claim cannot hold the 6 A floor after an override-only clear (the failure mode behind a persistent UI `mqtt` badge at 6 A).
+
+The bridge ignores **retained** `openevse/cmd/current_limit` (HA convenience retain); only live VEN publishes change hardware. That avoids a brief stale 32 A pulse on bridge reconnect.
+
+`OPENEVSE_STOP_MODE=disabled` (default) keeps FLEX ownership while forcing sleep. `release` / `clear` yields both channels to Auto/Eco and can leave the EVSE charging at the 6 A floor.
+
+Leave the OpenEVSE UI on **Auto**. Prefer `claim` so the UI Manual button can still interrupt FLEX. Use `override` only if you want FLEX to own the Manual path. Avoid `rapi` on modern firmware; it fights Manual/Auto.
 
 Set `OPENEVSE_MQTT_BASE` in `compose/.env` to match the OpenEVSE WiFi gateway.
 
