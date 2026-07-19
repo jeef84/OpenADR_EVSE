@@ -116,6 +116,8 @@ services:
       OPENEVSE_MQTT_BASE: ${OPENEVSE_MQTT_BASE:-openevse}
       OPENEVSE_I_MIN: ${OPENEVSE_I_MIN:-6}
       OPENEVSE_I_MAX: ${OPENEVSE_I_MAX:-48}
+      # Clear stale power / defer RAPI if no device MQTT for this long.
+      OPENEVSE_OFFLINE_SEC: ${OPENEVSE_OFFLINE_SEC:-60}
     depends_on:
       mosquitto:
         condition: service_started
