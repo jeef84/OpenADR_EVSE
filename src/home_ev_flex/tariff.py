@@ -97,3 +97,39 @@ def resolve_import_price(cfg: TariffConfig, when: datetime) -> float:
 def solar_surplus_kw(*, solar_kw: float, house_load_kw: float) -> float:
     """Power that would otherwise export if the EV does not consume it."""
     return max(0.0, solar_kw - house_load_kw)
+
+
+def grid_net_surplus_kw(
+    *,
+    export_kw: float,
+    import_kw: float,
+    ev_charge_kw: float = 0.0,
+) -> float:
+    """
+    Race-safe surplus from grid CTs plus current EV charge power.
+
+    When solar/house MQTT topics update independently they can briefly disagree.
+    Algebraically, with consistent sensors:
+      house = solar + import - export - ev
+      surplus = solar - house = export - import + ev
+    Prefer this form on the VEN control path.
+    """
+    return max(0.0, export_kw - import_kw + max(0.0, ev_charge_kw))
+
+
+def solar_only_target_kw(
+    *,
+    surplus_kw: float,
+    user_amp_limit: int,
+    voltage_v: float,
+    i_max_amps: int,
+    panel_service_headroom_kw: float,
+) -> float:
+    """
+    Charge power when mode is solar_only: measured excess solar, no grid import.
+
+    Ignores OpenADR IMPORT_POWER_LIMIT / cheap TOU import that economic mode would
+    otherwise accept. Still clamped by user amps and panel headroom.
+    """
+    user_kw = (min(user_amp_limit, i_max_amps) * voltage_v) / 1000.0
+    return max(0.0, min(max(0.0, surplus_kw), user_kw, panel_service_headroom_kw))

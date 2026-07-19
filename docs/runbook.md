@@ -5,7 +5,7 @@
 | Host | Components |
 | --- | --- |
 | Linux VM / PC | Postgres, OpenLEADR VTN, Mosquitto, tariff engine, VEN adapter, MQTT fixtures |
-| Home Assistant Green | Sensors, helpers, dashboard (production path) |
+| Home Assistant | Sensors, helpers, dashboard (production telemetry path) |
 
 ## Quick start (lab)
 
@@ -56,4 +56,7 @@ mqtt-fixtures --host localhost --scenario below_imin --once
 
 ## Safety note
 
-Charge Now bypasses price only. Hard amp limits in `config/tariff.yaml` (`evse_max_amps`, `branch_max_amps`, `i_min_amps`) still apply. Hardware GFCI / temperature protection remain with OpenEVSE.
+Charge Now bypasses price only. Hard amp limits in `config/tariff.yaml` (`evse_max_amps`, `branch_max_amps`, `i_min_amps`) still apply. OpenEVSE keeps GFCI / thermal / contactor safety locally.
+
+HOME EV FLEX drives OpenEVSE only (via `openevse_bridge`). Do not point a second automation at the same charger.
+

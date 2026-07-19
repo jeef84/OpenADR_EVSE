@@ -10,7 +10,8 @@ GRID_EXPORT_KW = f"{PREFIX}/telemetry/grid_export_kw"
 VOLTAGE_V = f"{PREFIX}/telemetry/voltage_v"
 
 # User controls from HA helpers
-MODE = f"{PREFIX}/control/mode"  # economic | charge_now
+# Mode published by HA: economic | solar_only | charge_now | stopped
+MODE = f"{PREFIX}/control/mode"
 BID_PRICE = f"{PREFIX}/control/bid_price_per_kwh"
 USER_AMP_LIMIT = f"{PREFIX}/control/user_amp_limit"
 
@@ -27,3 +28,5 @@ STATUS_EVENT_ACCEPTED = f"{PREFIX}/status/event_accepted"
 OPENEVSE_CURRENT_LIMIT = "openevse/cmd/current_limit"  # integer amps; 0 = stop
 OPENEVSE_POWER_KW = "openevse/status/power_kw"
 OPENEVSE_ENERGY_KWH = "openevse/status/energy_kwh"
+OPENEVSE_APPLIED_AMPS = "openevse/status/applied_current_limit"
+OPENEVSE_CONNECTED = "openevse/status/connected"

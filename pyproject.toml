@@ -24,6 +24,7 @@ dev = [
 [project.scripts]
 tariff-engine = "services.tariff_engine.main:main"
 ven-adapter = "services.ven_adapter.main:main"
+openevse-bridge = "services.openevse_bridge.main:main"
 mqtt-fixtures = "services.mqtt_fixtures.publish:main"
 lab-e2e = "scripts.lab_e2e:main"
 

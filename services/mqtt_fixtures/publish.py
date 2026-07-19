@@ -26,6 +26,18 @@ SCENARIOS = {
         topics.BID_PRICE: "0.16",
         topics.USER_AMP_LIMIT: "32",
     },
+    "solar_only": {
+        # Weekend-like: surplus 2 kW with HVAC load; economic would also accept
+        # cheap import, but solar_only must stay at surplus only (~8 A at 240 V).
+        topics.SOLAR_KW: "5.0",
+        topics.HOUSE_LOAD_KW: "3.0",
+        topics.GRID_IMPORT_KW: "0.0",
+        topics.GRID_EXPORT_KW: "2.0",
+        topics.VOLTAGE_V: "240.0",
+        topics.MODE: "solar_only",
+        topics.BID_PRICE: "0.50",
+        topics.USER_AMP_LIMIT: "32",
+    },
     "charge_now": {
         topics.SOLAR_KW: "0.0",
         topics.HOUSE_LOAD_KW: "1.0",
@@ -35,6 +47,16 @@ SCENARIOS = {
         topics.MODE: "charge_now",
         topics.BID_PRICE: "0.05",
         topics.USER_AMP_LIMIT: "24",
+    },
+    "stopped": {
+        topics.SOLAR_KW: "5.0",
+        topics.HOUSE_LOAD_KW: "2.0",
+        topics.GRID_IMPORT_KW: "0.0",
+        topics.GRID_EXPORT_KW: "3.0",
+        topics.VOLTAGE_V: "240.0",
+        topics.MODE: "stopped",
+        topics.BID_PRICE: "0.50",
+        topics.USER_AMP_LIMIT: "32",
     },
     "below_imin": {
         topics.SOLAR_KW: "2.0",

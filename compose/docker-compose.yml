@@ -93,6 +93,8 @@ services:
       VEN_CLIENT_SECRET: ${VEN_CLIENT_SECRET:-ven-client}
       TARIFF_CONFIG: /config/tariff.yaml
       VEN_INTERVAL_SEC: ${VEN_INTERVAL_SEC:-3}
+      # Weight on newest surplus sample (0.2 @ 3s ≈ 15s tracking).
+      VEN_SURPLUS_EMA_ALPHA: ${VEN_SURPLUS_EMA_ALPHA:-0.2}
     volumes:
       - ../config:/config:ro
     depends_on:
@@ -101,6 +103,23 @@ services:
       vtn-init:
         condition: service_completed_successfully
       tariff-engine:
+        condition: service_started
+
+  openevse-bridge:
+    build:
+      context: ..
+      dockerfile: services/openevse_bridge/Dockerfile
+    environment:
+      MQTT_HOST: mosquitto
+      MQTT_PORT: 1883
+      # Must match the OpenEVSE WiFi gateway MQTT base topic.
+      OPENEVSE_MQTT_BASE: ${OPENEVSE_MQTT_BASE:-openevse}
+      OPENEVSE_I_MIN: ${OPENEVSE_I_MIN:-6}
+      OPENEVSE_I_MAX: ${OPENEVSE_I_MAX:-48}
+    depends_on:
+      mosquitto:
+        condition: service_started
+      ven-adapter:
         condition: service_started
 
   mqtt-fixtures:

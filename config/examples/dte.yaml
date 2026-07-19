@@ -36,5 +36,5 @@ limits:
   evse_max_amps: 48
   branch_max_amps: 40
   i_min_amps: 6
-  amp_hysteresis_amps: 0.75
+  amp_hysteresis_amps: 2.5
   default_voltage_v: 240.0
