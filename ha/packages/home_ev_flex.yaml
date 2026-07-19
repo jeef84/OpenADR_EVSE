@@ -1,0 +1,291 @@
+# HOME_EV_FLEX Home Assistant package
+#
+# Publishes site telemetry + user controls to the Linux OpenADR stack.
+# Does NOT command the EVSE directly (VEN + openevse_bridge own amps).
+#
+# Hardware path:
+#   VEN -> openevse/cmd/current_limit -> services/openevse_bridge (MQTT RAPI)
+#
+# ---------------------------------------------------------------------------
+# SITE CONFIG — edit these entity_ids to match your Home Assistant instance
+# ---------------------------------------------------------------------------
+# Solar production sensor must be in kW. Examples:
+#   Enphase Envoy: sensor.envoy_<serial>_current_power_production
+#   Other inverter: whatever your integration exposes in kW
+#
+# Grid import / export sensors below expect watts (W). If yours are already
+# in kW, remove the "/ 1000" in the template sensors.
+#
+# Placeholders used in this file (search/replace before loading the package):
+#   sensor.YOUR_SOLAR_PRODUCTION_KW
+#   sensor.grid_import_power
+#   sensor.grid_export_power
+# ---------------------------------------------------------------------------
+#
+# Modes: economic | solar_only | charge_now | stopped
+#   solar_only -> measured excess solar only (no grid import even if TOU is cheap)
+#   stopped -> VEN commands 0 A regardless of price / bid / stale events
+
+input_boolean:
+  home_ev_flex_enabled:
+    name: "HOME EV FLEX Enabled"
+    icon: mdi:transmission-tower-export
+    initial: false
+
+input_number:
+  home_ev_flex_bid_price:
+    name: "HOME EV FLEX Bid ($/kWh)"
+    min: 0.01
+    max: 1.00
+    step: 0.005
+    mode: box
+    unit_of_measurement: "$/kWh"
+    icon: mdi:currency-usd
+    initial: 0.16
+
+  home_ev_flex_user_amp_limit:
+    name: "HOME EV FLEX User Amp Limit"
+    min: 6
+    max: 48
+    step: 1
+    mode: slider
+    unit_of_measurement: "A"
+    icon: mdi:current-ac
+    initial: 32
+
+  home_ev_flex_voltage_v:
+    name: "HOME EV FLEX Voltage"
+    min: 200
+    max: 250
+    step: 1
+    mode: box
+    unit_of_measurement: "V"
+    icon: mdi:flash
+    initial: 240
+
+input_select:
+  home_ev_flex_mode:
+    name: "HOME EV FLEX Mode"
+    icon: mdi:ev-station
+    options:
+      - economic
+      - solar_only
+      - charge_now
+      - stopped
+    initial: economic
+
+mqtt:
+  sensor:
+    - name: "HOME EV FLEX Commanded Amps"
+      unique_id: home_ev_flex_commanded_amps
+      state_topic: "openevse/cmd/current_limit"
+      unit_of_measurement: "A"
+      device_class: current
+      state_class: measurement
+      value_template: "{{ value | int(0) }}"
+
+    - name: "HOME EV FLEX Applied Amps"
+      unique_id: home_ev_flex_applied_amps
+      state_topic: "openevse/status/applied_current_limit"
+      unit_of_measurement: "A"
+      device_class: current
+      state_class: measurement
+      value_template: "{{ value | int(0) }}"
+
+    - name: "HOME EV FLEX OpenEVSE Power kW"
+      unique_id: home_ev_flex_openevse_power_kw
+      state_topic: "openevse/status/power_kw"
+      unit_of_measurement: "kW"
+      device_class: power
+      state_class: measurement
+      value_template: "{{ value | float(0) }}"
+
+    - name: "HOME EV FLEX OpenEVSE Energy kWh"
+      unique_id: home_ev_flex_openevse_energy_kwh
+      state_topic: "openevse/status/energy_kwh"
+      unit_of_measurement: "kWh"
+      device_class: energy
+      state_class: total_increasing
+      value_template: "{{ value | float(0) }}"
+
+    - name: "HOME EV FLEX OpenEVSE Connected"
+      unique_id: home_ev_flex_openevse_connected
+      state_topic: "openevse/status/connected"
+
+    - name: "HOME EV FLEX Target Amps"
+      unique_id: home_ev_flex_target_amps
+      state_topic: "home_ev_flex/status/target_amps"
+      unit_of_measurement: "A"
+      device_class: current
+      state_class: measurement
+      value_template: "{{ value | int(0) }}"
+
+    - name: "HOME EV FLEX Accepted Power kW"
+      unique_id: home_ev_flex_accepted_power_kw
+      state_topic: "home_ev_flex/status/accepted_power_kw"
+      unit_of_measurement: "kW"
+      device_class: power
+      state_class: measurement
+      value_template: "{{ value | float(0) }}"
+
+    - name: "HOME EV FLEX Marginal Price"
+      unique_id: home_ev_flex_marginal_price
+      state_topic: "home_ev_flex/status/marginal_price"
+      unit_of_measurement: "$/kWh"
+      state_class: measurement
+      value_template: "{{ value | float(0) if value not in ['', 'None', 'none'] else none }}"
+
+    - name: "HOME EV FLEX Import Limit kW"
+      unique_id: home_ev_flex_import_limit_kw
+      state_topic: "home_ev_flex/status/import_power_limit_kw"
+      unit_of_measurement: "kW"
+      device_class: power
+      state_class: measurement
+      value_template: "{{ value | float(0) }}"
+
+    - name: "HOME EV FLEX Override Active"
+      unique_id: home_ev_flex_override_active
+      state_topic: "home_ev_flex/status/override_active"
+
+    - name: "HOME EV FLEX Event Accepted"
+      unique_id: home_ev_flex_event_accepted
+      state_topic: "home_ev_flex/status/event_accepted"
+
+template:
+  - sensor:
+      - name: "HOME EV FLEX Solar kW"
+        unique_id: home_ev_flex_solar_kw
+        unit_of_measurement: "kW"
+        device_class: power
+        state_class: measurement
+        availability: >
+          {{ states('sensor.YOUR_SOLAR_PRODUCTION_KW')
+             not in ['unavailable', 'unknown', 'none'] }}
+        state: >
+          {{ states('sensor.YOUR_SOLAR_PRODUCTION_KW') | float(0) | round(3) }}
+
+      - name: "HOME EV FLEX Grid Import kW"
+        unique_id: home_ev_flex_grid_import_kw
+        unit_of_measurement: "kW"
+        device_class: power
+        state_class: measurement
+        availability: >
+          {{ states('sensor.grid_import_power') not in ['unavailable', 'unknown'] }}
+        state: >
+          {{ (states('sensor.grid_import_power') | float(0) / 1000) | round(3) }}
+
+      - name: "HOME EV FLEX Grid Export kW"
+        unique_id: home_ev_flex_grid_export_kw
+        unit_of_measurement: "kW"
+        device_class: power
+        state_class: measurement
+        availability: >
+          {{ states('sensor.grid_export_power') not in ['unavailable', 'unknown'] }}
+        state: >
+          {{ (states('sensor.grid_export_power') | float(0) / 1000) | round(3) }}
+
+      # House load excluding the OpenEVSE under FLEX control.
+      - name: "HOME EV FLEX House Load kW"
+        unique_id: home_ev_flex_house_load_kw
+        unit_of_measurement: "kW"
+        device_class: power
+        state_class: measurement
+        availability: >
+          {{ states('sensor.YOUR_SOLAR_PRODUCTION_KW')
+             not in ['unavailable', 'unknown', 'none']
+             and states('sensor.grid_import_power') not in ['unavailable', 'unknown']
+             and states('sensor.grid_export_power') not in ['unavailable', 'unknown'] }}
+        state: >
+          {% set solar_kw = states('sensor.YOUR_SOLAR_PRODUCTION_KW') | float(0) %}
+          {% set import_kw = states('sensor.grid_import_power') | float(0) / 1000 %}
+          {% set export_kw = states('sensor.grid_export_power') | float(0) / 1000 %}
+          {% set evse_kw = states('sensor.home_ev_flex_openevse_power_kw') | float(0) %}
+          {% set site_kw = solar_kw + import_kw - export_kw %}
+          {{ [0, site_kw - evse_kw] | max | round(3) }}
+
+      - name: "HOME EV FLEX Voltage V"
+        unique_id: home_ev_flex_voltage_v
+        unit_of_measurement: "V"
+        device_class: voltage
+        state_class: measurement
+        state: >
+          {{ states('input_number.home_ev_flex_voltage_v') | float(240) | round(0) }}
+
+automation:
+  - id: home_ev_flex_publish_telemetry
+    alias: "HOME EV FLEX: Publish telemetry to MQTT"
+    mode: queued
+    max: 5
+    trigger:
+      - platform: state
+        entity_id:
+          - sensor.home_ev_flex_solar_kw
+          - sensor.home_ev_flex_house_load_kw
+          - sensor.home_ev_flex_grid_import_kw
+          - sensor.home_ev_flex_grid_export_kw
+          - sensor.home_ev_flex_voltage_v
+      - platform: time_pattern
+        seconds: "/15"
+    condition:
+      - condition: state
+        entity_id: input_boolean.home_ev_flex_enabled
+        state: "on"
+    action:
+      - service: mqtt.publish
+        data:
+          topic: home_ev_flex/telemetry/solar_kw
+          payload: "{{ states('sensor.home_ev_flex_solar_kw') }}"
+          retain: true
+      - service: mqtt.publish
+        data:
+          topic: home_ev_flex/telemetry/house_load_kw
+          payload: "{{ states('sensor.home_ev_flex_house_load_kw') }}"
+          retain: true
+      - service: mqtt.publish
+        data:
+          topic: home_ev_flex/telemetry/grid_import_kw
+          payload: "{{ states('sensor.home_ev_flex_grid_import_kw') }}"
+          retain: true
+      - service: mqtt.publish
+        data:
+          topic: home_ev_flex/telemetry/grid_export_kw
+          payload: "{{ states('sensor.home_ev_flex_grid_export_kw') }}"
+          retain: true
+      - service: mqtt.publish
+        data:
+          topic: home_ev_flex/telemetry/voltage_v
+          payload: "{{ states('sensor.home_ev_flex_voltage_v') }}"
+          retain: true
+
+  - id: home_ev_flex_publish_controls
+    alias: "HOME EV FLEX: Publish controls to MQTT"
+    mode: single
+    trigger:
+      - platform: state
+        entity_id:
+          - input_number.home_ev_flex_bid_price
+          - input_number.home_ev_flex_user_amp_limit
+          - input_select.home_ev_flex_mode
+          - input_boolean.home_ev_flex_enabled
+      - platform: homeassistant
+        event: start
+    condition:
+      - condition: state
+        entity_id: input_boolean.home_ev_flex_enabled
+        state: "on"
+    action:
+      - service: mqtt.publish
+        data:
+          topic: home_ev_flex/control/bid_price_per_kwh
+          payload: "{{ states('input_number.home_ev_flex_bid_price') }}"
+          retain: true
+      - service: mqtt.publish
+        data:
+          topic: home_ev_flex/control/user_amp_limit
+          payload: "{{ states('input_number.home_ev_flex_user_amp_limit') | int }}"
+          retain: true
+      - service: mqtt.publish
+        data:
+          topic: home_ev_flex/control/mode
+          payload: "{{ states('input_select.home_ev_flex_mode') }}"
+          retain: true
