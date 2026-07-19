@@ -1,6 +1,7 @@
 services:
   db:
     image: postgres:18
+    restart: unless-stopped
     environment:
       POSTGRES_USER: ${PG_USER:-openadr}
       POSTGRES_DB: ${PG_DB:-openadr}
@@ -20,6 +21,7 @@ services:
   vtn:
     # OpenADR 3.1 VTN (OpenLEADR). Auto-runs sqlx migrations on startup.
     image: ghcr.io/openleadr/openleadr-rs:v0.2.4
+    restart: unless-stopped
     ports:
       - "${VTN_PORT:-3000}:3000"
     environment:
@@ -50,6 +52,7 @@ services:
 
   mosquitto:
     image: eclipse-mosquitto:2
+    restart: unless-stopped
     ports:
       - "${MQTT_PORT:-1883}:1883"
     volumes:
@@ -59,6 +62,7 @@ services:
     build:
       context: ..
       dockerfile: services/tariff_engine/Dockerfile
+    restart: unless-stopped
     environment:
       MQTT_HOST: mosquitto
       MQTT_PORT: 1883
@@ -82,6 +86,7 @@ services:
     build:
       context: ..
       dockerfile: services/ven_adapter/Dockerfile
+    restart: unless-stopped
     environment:
       MQTT_HOST: mosquitto
       MQTT_PORT: 1883
@@ -109,6 +114,7 @@ services:
     build:
       context: ..
       dockerfile: services/openevse_bridge/Dockerfile
+    restart: unless-stopped
     environment:
       MQTT_HOST: mosquitto
       MQTT_PORT: 1883
@@ -128,6 +134,7 @@ services:
     build:
       context: ..
       dockerfile: services/mqtt_fixtures/Dockerfile
+    restart: unless-stopped
     environment:
       MQTT_HOST: mosquitto
       MQTT_PORT: 1883

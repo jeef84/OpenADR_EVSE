@@ -102,6 +102,10 @@ Topic contract: [ha/mqtt_contract.md](ha/mqtt_contract.md).
 
 ## 5. Day-2 ops
 
+Long-running services use `restart: unless-stopped` (crash and reboot recovery).
+`vtn-init` stays one-shot. If you `docker compose stop mqtt-fixtures` for live HA,
+it stays stopped across reboots until you start it again.
+
 ```bash
 # Tariff / limit changes
 # edit config/tariff.yaml, then:
