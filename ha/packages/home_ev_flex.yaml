@@ -1,0 +1,56 @@
+# Example Home Assistant package sketch for HOME_EV_FLEX helpers.
+# Copy into HA packages/ or adapt into your existing config.
+# Requires MQTT integration pointed at the lab/production broker.
+
+input_number:
+  ev_bid_price:
+    name: EV bid price
+    min: 0.01
+    max: 1.00
+    step: 0.01
+    unit_of_measurement: USD/kWh
+    mode: box
+    initial: 0.16
+
+  ev_user_amp_limit:
+    name: EV user amp limit
+    min: 6
+    max: 48
+    step: 1
+    unit_of_measurement: A
+    mode: box
+    initial: 32
+
+input_select:
+  ev_charge_mode:
+    name: EV charge mode
+    options:
+      - economic
+      - charge_now
+    initial: economic
+
+automation:
+  - id: home_ev_flex_publish_controls
+    alias: Publish HOME_EV_FLEX controls to MQTT
+    trigger:
+      - platform: state
+        entity_id:
+          - input_number.ev_bid_price
+          - input_number.ev_user_amp_limit
+          - input_select.ev_charge_mode
+    action:
+      - service: mqtt.publish
+        data:
+          topic: home_ev_flex/control/bid_price_per_kwh
+          payload: "{{ states('input_number.ev_bid_price') }}"
+          retain: true
+      - service: mqtt.publish
+        data:
+          topic: home_ev_flex/control/user_amp_limit
+          payload: "{{ states('input_number.ev_user_amp_limit') | int }}"
+          retain: true
+      - service: mqtt.publish
+        data:
+          topic: home_ev_flex/control/mode
+          payload: "{{ states('input_select.ev_charge_mode') }}"
+          retain: true

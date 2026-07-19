@@ -1,0 +1,40 @@
+# Example: DTE Energy (Michigan) residential Time-of-Day 11 a.m. to 7 p.m. (D1.2-style).
+# Copy to ../tariff.yaml (or set TARIFF_CONFIG) and replace placeholders from the
+# current DTE Residential Electric Rate Card / MPSC filings:
+# https://www.dteenergy.com/content/dam/dteenergy/deg/website/residential/Service-Request/pricing/residential-pricing-options/ResidentialElectricRateCard.pdf
+#
+# Rates below match the Milestone 1 worked example, not a live rate card scrape.
+
+utility: DTE
+timezone: America/Detroit
+rate_schedule: D1.2
+price_source: static_yaml
+
+notes: >
+  Rider 18 Distributed Generation outflow credit is simplified to a single
+  export.credit_per_kwh for Milestone 1. Real Rider 18 credits are seasonal
+  and TOU-tiered; fold that into this field or extend the YAML when needed.
+
+import_rates:
+  weekday:
+    on_peak:
+      start: "11:00"
+      end: "19:00"
+      price_per_kwh: 0.18
+    off_peak:
+      price_per_kwh: 0.14
+  weekend:
+    all_day:
+      price_per_kwh: 0.14
+
+export:
+  # Opportunity cost of consuming solar that would otherwise export (Rider 18).
+  credit_per_kwh: 0.07
+
+limits:
+  panel_service_headroom_kw: 7.68
+  evse_max_amps: 48
+  branch_max_amps: 40
+  i_min_amps: 6
+  amp_hysteresis_amps: 0.75
+  default_voltage_v: 240.0

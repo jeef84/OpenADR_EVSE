@@ -1,16 +1,17 @@
 # Local OpenADR 3.1 EVSE Testbed (Milestone 1)
 
-Stand up a local OpenADR 3.1 testbed that turns DTE tariff config plus Home Assistant telemetry into EVSE current limits via a marginal-cost supply curve, using OpenLEADR for the VTN and a Python tariff engine plus VEN adapter for business logic and OpenEVSE control.
+Stand up a local OpenADR 3.1 testbed that turns editable utility tariff config plus Home Assistant telemetry into EVSE current limits via a marginal-cost supply curve, using OpenLEADR for the VTN and a Python tariff engine plus VEN adapter for business logic and OpenEVSE control.
 
 Build a closed-loop prototype: synthesize a local marginal price, publish it through OpenADR 3.1, and drive OpenEVSE amperage. No forecasting, vehicle SOC, or deadline-aware bidding yet.
 
 ## Design invariants
 
-- **DTE tariff** supplies the fixed external cost structure (config, not a live utility OpenADR feed).
+- **Utility tariff config** supplies the fixed external cost structure (editable YAML baseline; not hard-coded to one retailer, and not a live utility OpenADR feed in Milestone 1).
 - **Home energy / tariff engine** synthesizes the local marginal price and site constraints.
 - **OpenADR** communicates that synthesized price and import allowance to the VEN.
 - **VEN** decides charge/no-charge and the **integer amp** command for OpenEVSE.
 - **Manual override and safety limits** sit outside economic logic. Charge Now bypasses price; it never bypasses hard safety.
+- **Extensibility**: shipped examples (e.g. DTE) are baselines users copy and edit; the schema and engine stay utility-agnostic.
 
 Keep economics in **$/kWh**, not $/kW:
 
@@ -68,8 +69,8 @@ flowchart TD
 
 **Tariff / business-logic service**
 
-- Resolve weekday/weekend (and later seasonal) tariff periods.
-- Calculate import price and Rider 18 export opportunity cost.
+- Resolve weekday/weekend (and later seasonal) tariff periods from YAML.
+- Calculate import price and export opportunity cost (forgone export / net-metering credit).
 - Build the marginal power supply curve and accepted kW.
 - Create/update OpenADR programs and events on the VTN (BL client). Does **not** command OpenEVSE amps.
 
@@ -90,12 +91,13 @@ flowchart TD
 
 ```text
 compose/                 # Docker Compose: VTN, Postgres, Mosquitto, tariff, ven
-config/dte_tariff.yaml   # Editable DTE rates + Rider 18 credit
+config/tariff.yaml       # Active site tariff (utility-agnostic schema)
+config/examples/         # Shipped baselines to copy (e.g. dte.yaml)
 services/tariff_engine/  # Supply curve + OpenADR BL client
 services/ven_adapter/    # Event consumer + OpenEVSE control + reports
 ha/                      # MQTT topic contract + example HA package
 tests/                   # Unit tests for supply curve and amperage math
-docs/                    # Short runbook (dev + HA wiring)
+docs/                    # Runbook + tariff config guide
 ```
 
 ## Marginal cost and supply curve
@@ -104,10 +106,10 @@ For each incremental watt of EV charging:
 
 | Situation | Marginal cost |
 | --- | --- |
-| Importing from DTE | Current retail TOU import rate ($/kWh) |
-| Consuming otherwise-exported solar | Rider 18 forgone export credit ($/kWh) |
+| Importing from the utility | Current retail TOU import rate ($/kWh) |
+| Consuming otherwise-exported solar | Forgone export credit / net-metering credit ($/kWh) |
 
-Solar is not free; its opportunity cost is the export credit you would have received from DTE under Rider 18. See [DTE residential electric rate card](https://www.dteenergy.com/content/dam/dteenergy/deg/website/residential/Service-Request/pricing/residential-pricing-options/ResidentialElectricRateCard.pdf) for published rates (editable in config; subject to MPSC changes).
+Solar is not free; its opportunity cost is the export credit you would have received under your utility's export / DG rider. Shipped example: [DTE residential electric rate card](https://www.dteenergy.com/content/dam/dteenergy/deg/website/residential/Service-Request/pricing/residential-pricing-options/ResidentialElectricRateCard.pdf) and Rider 18 (editable in `config/examples/dte.yaml`; subject to MPSC changes). Other utilities use the same YAML fields with their own numbers.
 
 ### Worked stack example
 
@@ -130,7 +132,7 @@ Only the first block is at or below the bid, so accepted continuous power is **3
 
 | Source or power block | Available power | Marginal price |
 | --- | ---: | ---: |
-| Solar that would otherwise export | measured surplus kW | Rider 18 export credit |
+| Solar that would otherwise export | measured surplus kW | export credit from config |
 | Grid import (off-peak or on-peak) | unlimited within site limit | matching TOU retail rate |
 | Reserved emergency / service-head margin | not offered | effectively infinite |
 
@@ -218,15 +220,17 @@ Manual override: charge at user-selected **integer** current until stopped, unpl
 - **Solar only**: charge only from measured excess solar (economic mode already solar-first stacks; dedicated mode later).
 - **Ready by departure**: raise bid as slack shrinks; needs energy remaining and departure time (out of scope).
 
-## DTE tariff configuration
+## Utility tariff configuration
 
-Do not rely on a live DTE feed. Store tariff as editable YAML. Include variable surcharges/credits that scale with kWh in the fully loaded marginal import price; exclude fixed monthly charges.
+Do not hard-code a retailer in application code. Store the baseline as editable YAML (`config/tariff.yaml`), with contributed examples under `config/examples/`. Include variable surcharges/credits that scale with kWh in the fully loaded marginal import price; exclude fixed monthly charges.
 
-DTE 11 a.m.–7 p.m. option: weekday on-peak 11:00–19:00 local; off-peak 19:00–11:00 and all weekend. Rates are placeholders; fill from the current DTE rate card.
+Milestone 1 ships a DTE-shaped worked example (weekday on-peak 11:00-19:00 local; off-peak otherwise and all weekend) as `config/examples/dte.yaml`. Rates are placeholders; users fill from their current rate card. The same schema works for any TOU utility with an export opportunity cost.
 
 ```yaml
-utility: DTE
+utility: YourUtility
 timezone: America/Detroit
+rate_schedule: residential_tou
+price_source: static_yaml   # M1 only; see Future work for realtime providers
 
 import_rates:
   weekday:
@@ -241,7 +245,7 @@ import_rates:
       price_per_kwh: 0.xxx
 
 export:
-  rider_18_credit_per_kwh: 0.xxx
+  credit_per_kwh: 0.xxx
 
 limits:
   panel_service_headroom_kw: 0.xxx
@@ -300,7 +304,7 @@ Deferred signal shapes (not required for Milestone 1): `AVAILABLE_POWER`, `CHARG
 ## Closed-loop data path (Milestone 1)
 
 1. HA publishes: solar production, house load, grid import/export, override mode, EV bid price, user amp limit.
-2. Tariff engine determines: current DTE import price, Rider 18 export opportunity cost, solar-surplus power, supply-curve acceptance, PRICE + IMPORT_POWER_LIMIT.
+2. Tariff engine determines: current import price from config, export opportunity cost, solar-surplus power, supply-curve acceptance, PRICE + IMPORT_POWER_LIMIT.
 3. VTN stores/serves those events.
 4. VEN calculates charge/no-charge and target integer amps (with hysteresis and safety clamps).
 5. OpenEVSE receives the current limit.
@@ -317,7 +321,7 @@ Deferred signal shapes (not required for Milestone 1): `AVAILABLE_POWER`, `CHARG
 ### 2. Tariff / business-logic service
 
 - Subscribe to HA MQTT topics (solar, house load, grid, bid, mode).
-- Resolve current import price from `config/dte_tariff.yaml` in `America/Detroit`.
+- Resolve current import price from `config/tariff.yaml` in the configured IANA timezone.
 - Build supply curve; compute accepted kW, effective marginal price, and import-power allowance.
 - Upsert `HOME_EV_FLEX` events on the VTN as BL client (not amp commands).
 - Unit tests for the worked stack: $0.07 / $0.18 / bid $0.16 → accepted 3 kW; at 240 V VEN floors to **12 A**.
@@ -340,7 +344,7 @@ Deferred signal shapes (not required for Milestone 1): `AVAILABLE_POWER`, `CHARG
 ## Implementation todos
 
 1. Add Docker Compose for OpenLEADR VTN, Postgres, Mosquitto, and service stubs
-2. Add editable DTE tariff YAML (schema above) and America/Detroit TOU resolver
+2. Add editable utility-agnostic tariff YAML (schema above), example baselines under `config/examples/`, and TOU resolver
 3. Implement marginal supply curve plus discrete-amp quantization and amp hysteresis with intent-focused unit tests
 4. Tariff engine: MQTT subscribe, compute targets, upsert HOME_EV_FLEX events on VTN
 5. VEN: poll events, map to OpenEVSE current limit, enforce overrides/safety, post reports
@@ -364,8 +368,26 @@ Deferred signal shapes (not required for Milestone 1): `AVAILABLE_POWER`, `CHARG
 - Vehicle SOC / OEM APIs
 - HA add-on packaging
 - OpenADR 3.0 compatibility
-- Live DTE price feeds
-- Capacity/policy adders beyond TOU import + Rider 18 export opportunity cost
+- Live / real-time published utility price feeds (see Future work)
+- Capacity/policy adders beyond TOU import + export opportunity cost from config
+
+## Future work (post Milestone 1)
+
+### Real-time published prices
+
+Very few residential utilities publish machine-readable real-time prices today. When they do, add optional `price_source` providers that ingest those feeds and feed the same supply-curve + OpenADR path:
+
+- Keep `static_yaml` as the default and offline/lab path.
+- Add pluggable providers (examples to evaluate later): ISO/RTO LMP where retail tracks it, utility RTP / hourly API, Green Button Connect, or OpenADR signals from the utility/VTN itself.
+- Provider output must still be marginal **$/kWh** (and optional export opportunity cost), not a parallel control path around the VEN.
+- Fail loud when a configured realtime source is unavailable; do not silently substitute stale mock rates that hide outages.
+- Document per-utility auth, polling interval, and units in `config/examples/` as contributors add them.
+
+### Other extensions
+
+- Seasonal / multi-period TOU and tiered export credits in YAML
+- Additional utility example baselines under `config/examples/`
+- Ready-by-departure and solar-only modes (already deferred above)
 
 ## Suggested implementation order
 
@@ -379,4 +401,5 @@ Deferred signal shapes (not required for Milestone 1): `AVAILABLE_POWER`, `CHARG
 
 - [OpenLEADR openleadr-rs](https://github.com/OpenLEADR/openleadr-rs) (OpenADR 3.1 VTN/VEN)
 - [OpenADR 3 overview / OpenAPI](https://www.openadr.org/openadr-3-0)
-- [DTE Residential Electric Rate Card](https://www.dteenergy.com/content/dam/dteenergy/deg/website/residential/Service-Request/pricing/residential-pricing-options/ResidentialElectricRateCard.pdf)
+- Example baseline: [DTE Residential Electric Rate Card](https://www.dteenergy.com/content/dam/dteenergy/deg/website/residential/Service-Request/pricing/residential-pricing-options/ResidentialElectricRateCard.pdf)
+- [Tariff config guide](../docs/tariff-config.md)

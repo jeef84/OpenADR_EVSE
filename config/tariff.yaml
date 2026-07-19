@@ -1,0 +1,38 @@
+# Active site tariff. Copy from config/examples/ and edit for your utility.
+# Schema is utility-agnostic: any TOU retailer with an export opportunity cost works.
+# Point services at this file via TARIFF_CONFIG (default: /config/tariff.yaml).
+
+utility: ExampleUtility
+timezone: America/Detroit
+rate_schedule: residential_tou
+price_source: static_yaml  # Milestone 1: YAML only. Future: realtime_* providers.
+
+notes: >
+  Placeholder fully loaded marginal import prices ($/kWh). Exclude fixed monthly
+  charges. Include variable per-kWh surcharges when you update from your utility
+  rate card. Export credit is the opportunity cost of consuming solar that would
+  otherwise be exported (net metering credit, export tariff, etc.).
+
+# Weekday on-peak window is local time in `timezone`.
+import_rates:
+  weekday:
+    on_peak:
+      start: "11:00"
+      end: "19:00"
+      price_per_kwh: 0.18
+    off_peak:
+      price_per_kwh: 0.14
+  weekend:
+    all_day:
+      price_per_kwh: 0.14
+
+export:
+  credit_per_kwh: 0.07
+
+limits:
+  panel_service_headroom_kw: 7.68
+  evse_max_amps: 48
+  branch_max_amps: 40
+  i_min_amps: 6
+  amp_hysteresis_amps: 0.75
+  default_voltage_v: 240.0
