@@ -4,27 +4,101 @@ Turns editable utility tariff config plus Home Assistant MQTT telemetry into Ope
 
 **Milestone 1 modes:** `economic`, `solar_only`, `charge_now`, `stopped`, plus a ready-by-departure overlay (SOC + daily ready-by clock).
 
+New here? Start with [Getting started](#getting-started) (what runs where, which sensors you need, lab vs production path).
+
 ## Table of contents
 
-1. [Architecture](#architecture)
-2. [How it works](#how-it-works)
-3. [Prerequisites](#prerequisites)
-4. [Clone and configure](#1-clone-and-configure)
-5. [Lab stack (no Home Assistant)](#2-lab-stack-no-home-assistant)
-6. [Real OpenEVSE on the same broker](#3-real-openevse-on-the-same-broker)
-7. [Home Assistant (production telemetry)](#4-home-assistant-production-telemetry)
-8. [Modes](#modes)
-9. [Tariff configuration](#tariff-configuration)
-10. [Carbon-priced import (optional)](#carbon-priced-import-optional)
-11. [MQTT topic contract](#mqtt-topic-contract)
-12. [OpenEVSE bridge](#openevse-bridge)
-13. [Environment variables](#environment-variables)
-14. [Day-2 ops](#5-day-2-ops)
-15. [Testing](#testing)
-16. [Safety](#safety)
-17. [Repository layout](#repository-layout)
-18. [Further documentation](#further-documentation)
-19. [Scope and non-goals](#scope-and-non-goals)
+1. [Getting started](#getting-started)
+2. [Architecture](#architecture)
+3. [How it works](#how-it-works)
+4. [Prerequisites](#prerequisites)
+5. [Clone and configure](#1-clone-and-configure)
+6. [Lab stack (no Home Assistant)](#2-lab-stack-no-home-assistant)
+7. [Real OpenEVSE on the same broker](#3-real-openevse-on-the-same-broker)
+8. [Home Assistant (production telemetry)](#4-home-assistant-production-telemetry)
+9. [Modes](#modes)
+10. [Tariff configuration](#tariff-configuration)
+11. [Carbon-priced import (optional)](#carbon-priced-import-optional)
+12. [MQTT topic contract](#mqtt-topic-contract)
+13. [OpenEVSE bridge](#openevse-bridge)
+14. [Environment variables](#environment-variables)
+15. [Day-2 ops](#5-day-2-ops)
+16. [Testing](#testing)
+17. [Safety](#safety)
+18. [Repository layout](#repository-layout)
+19. [Further documentation](#further-documentation)
+20. [Scope and non-goals](#scope-and-non-goals)
+
+---
+
+## Getting started
+
+If you only read one section, read this. The rest of the README is reference once you know which path you are on.
+
+### Choose a path
+
+| Goal | Do this |
+| --- | --- |
+| Prove the stack with fake telemetry (no HA, no charger) | [Clone and configure](#1-clone-and-configure) → [Lab stack](#2-lab-stack-no-home-assistant) → `lab-e2e` |
+| Drive a real OpenEVSE from the lab | Lab stack above → [Real OpenEVSE](#3-real-openevse-on-the-same-broker) |
+| Run at home with Home Assistant | Configure env + tariff → stop fixtures → [HA production](#4-home-assistant-production-telemetry) → enable FLEX in HA |
+
+Recommended order for a new site: lab first (confirm 12 A on `worked_stack`), then point OpenEVSE at the broker, then swap fixtures for HA.
+
+### What goes on which device
+
+| Device | Runs | Does not run |
+| --- | --- | --- |
+| **Linux host / VM** (Docker Compose) | Mosquitto, Postgres, OpenLEADR VTN, tariff engine, VEN adapter, openevse_bridge, optional mqtt-fixtures | HA dashboards / helpers |
+| **Home Assistant** | Site sensors, FLEX helpers, MQTT publish of telemetry/controls, status display | Amp setpoints to the charger (VEN + bridge own that) |
+| **OpenEVSE WiFi gateway** | MQTT claim/override from the bridge; local GFCI / thermal safety | Tariff math or mode logic |
+
+Shared requirement: HA (or fixtures) and OpenEVSE must use the **same MQTT broker** as the compose stack.
+
+### Production checklist (HA + OpenEVSE)
+
+**1. Linux host**
+
+1. Copy `compose/.env.example` → `compose/.env`; set `OAUTH_BASE64_SECRET` and `OPENEVSE_MQTT_BASE`.
+2. Copy/adapt `config/tariff.yaml` (timezone, TOU, export credit, amp limits). See [Tariff configuration](#tariff-configuration).
+3. `docker compose up -d --build` from `compose/`, then `docker compose stop mqtt-fixtures` so fake HA data does not fight live sensors.
+
+**2. Sensors you must already have in HA**
+
+The package does not create your inverter or CT entities. Wire these placeholders in `ha/packages/home_ev_flex.yaml` (SITE CONFIG header):
+
+| You provide | Units | Used for |
+| --- | --- | --- |
+| Solar production entity (replace `sensor.YOUR_SOLAR_PRODUCTION_KW`) | **kW** | Export opportunity / surplus |
+| Grid import CT (default name `sensor.grid_import_power`) | **W** in the shipped templates (`/ 1000` → kW); drop `/ 1000` if already kW | Import block + surplus |
+| Grid export CT (default name `sensor.grid_export_power`) | same as import | Surplus for `solar_only` / economic solar block |
+
+Optional (only if `carbon_price.enabled` in tariff YAML):
+
+| You provide | Units |
+| --- | --- |
+| `sensor.electricity_maps_co2_intensity` | gCO2eq/kWh |
+| `sensor.electricity_maps_grid_fossil_fuel_percentage` | % |
+
+OpenEVSE power / energy / connected arrive over MQTT from the bridge (`openevse/status/*`); you do not invent those as HA templates.
+
+**3. What the HA package creates for you**
+
+Copy `ha/packages/home_ev_flex.yaml` into HA `packages/` (enable packages in `configuration.yaml` if needed), edit SITE CONFIG, reload/restart. You get:
+
+- Helpers: enable, mode, bid, user amp limit, voltage, ready-by / SOC sticky settings (see [HA helpers](#ha-helpers))
+- Template sensors that normalize solar/grid into FLEX kW entities
+- Automations that publish `home_ev_flex/telemetry/*` and `home_ev_flex/control/*` when FLEX is enabled
+- MQTT sensors for VEN status (target amps, prices, effective SOC, deadline flags)
+
+**4. First live session**
+
+1. OpenEVSE UI on **Auto** (Robot); only FLEX should drive the charger.
+2. In HA: set mode (start with `solar_only` or `economic`), bid, user amp limit, parked SOC (or leave 0 for assumed 40%), sticky battery/target/ready-by if needed.
+3. Turn **HOME EV FLEX Enabled** on.
+4. On the Linux host: `docker compose logs -f ven-adapter` and `openevse-bridge` (claim/set on charge; dual disable on stop).
+
+Detail for each step lives in sections 1-4 below. Topic-level contract: [ha/mqtt_contract.md](ha/mqtt_contract.md).
 
 ---
 
@@ -167,6 +241,8 @@ docker compose stop mqtt-fixtures
 ---
 
 ## 4. Home Assistant (production telemetry)
+
+High-level checklist (what you provide vs what the package creates): [Production checklist](#production-checklist-ha--openevse).
 
 1. Ensure HA can publish/subscribe to the same Mosquitto instance (MQTT integration).
 2. Copy `ha/packages/home_ev_flex.yaml` into your HA `packages/` directory (enable packages in `configuration.yaml` if needed).
@@ -439,6 +515,7 @@ Core library modules (`src/home_ev_flex/`):
 
 | Doc | Contents |
 | --- | --- |
+| [Getting started](#getting-started) (this README) | Path choice, what runs where, HA sensor checklist |
 | [docs/runbook.md](docs/runbook.md) | What runs where, credentials, fixture switching |
 | [docs/tariff-config.md](docs/tariff-config.md) | Full tariff schema, carbon overlay, future price sources |
 | [ha/mqtt_contract.md](ha/mqtt_contract.md) | HA helpers, topics, bridge mapping, divert notes |
