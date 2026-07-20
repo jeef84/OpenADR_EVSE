@@ -59,6 +59,8 @@ class LocalState:
     last_soc_for_snapshot: float = 0.0
     # True after retained restore applied or restore window sealed (avoid late overwrite).
     soc_tracking_restored: bool = False
+    # Once effective SOC hits target, stay stopped until parked SOC baseline changes.
+    target_met: bool = False
     lock: threading.Lock = field(default_factory=threading.Lock)
 
 
@@ -118,12 +120,16 @@ class VenAdapter:
         self.client_secret = _env("VEN_CLIENT_SECRET", "ven-client")
         self._stop = threading.Event()
         self._ven = None
+        # Do not publish retained tracking until startup restore has finished.
+        self._allow_soc_tracking_publish = False
         self._mqtt = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2, client_id="ven-adapter")
         self._mqtt.on_connect = self._on_connect
         self._mqtt.on_message = self._on_message
 
     def _on_connect(self, client, userdata, flags, reason_code, properties=None) -> None:  # noqa: ANN001
         logger.info("MQTT connected rc=%s", reason_code)
+        # Restore accrual before other retained topics can start a fresh snapshot.
+        client.subscribe(topics.STATUS_SOC_TRACKING)
         for topic in (
             topics.MODE,
             topics.BID_PRICE,
@@ -140,9 +146,13 @@ class VenAdapter:
             topics.BATTERY_CAPACITY_KWH,
             topics.READY_BY_TIME,
             topics.READY_BY_ENABLED,
-            topics.STATUS_SOC_TRACKING,
         ):
             client.subscribe(topic)
+
+    def _min_energy_for_target(self, baseline_soc: float, target_soc: float, battery_kwh: float) -> float:
+        if battery_kwh <= 0:
+            return 0.0
+        return max(0.0, (float(target_soc) - float(baseline_soc)) / 100.0 * float(battery_kwh))
 
     def _restore_soc_tracking(self, payload: str) -> None:
         """Apply retained accrual from a prior VEN process (survives rebuild/restart)."""
@@ -153,6 +163,7 @@ class VenAdapter:
             data = json.loads(payload)
             baseline = float(data.get("baseline_soc_pct", 0))
             added = float(data.get("energy_added_kwh", 0))
+            target_met = bool(data.get("target_met", False))
         except (TypeError, ValueError, json.JSONDecodeError):
             logger.warning("ignoring bad soc_tracking payload=%r", payload)
             return
@@ -169,24 +180,40 @@ class VenAdapter:
         self.state.energy_added_since_soc_kwh = added
         self.state.last_soc_for_snapshot = baseline
         self.state.soc_tracking_active = True
+        self.state.target_met = target_met
+        if target_met:
+            floor = self._min_energy_for_target(
+                baseline, self.state.target_soc_pct, self.state.battery_capacity_kwh
+            )
+            self.state.energy_added_since_soc_kwh = max(added, floor)
         logger.info(
-            "SOC tracking restored baseline=%.1f%% added=%.3fkWh",
+            "SOC tracking restored baseline=%.1f%% added=%.3fkWh target_met=%s",
             baseline,
-            added,
+            self.state.energy_added_since_soc_kwh,
+            target_met,
         )
 
     def _publish_soc_tracking(self) -> None:
+        if not self._allow_soc_tracking_publish:
+            return
         with self.state.lock:
             if self.state.last_soc_for_snapshot <= 0:
-                payload = json.dumps({"baseline_soc_pct": 0.0, "energy_added_kwh": 0.0})
+                payload = json.dumps(
+                    {
+                        "baseline_soc_pct": 0.0,
+                        "energy_added_kwh": 0.0,
+                        "target_met": False,
+                    }
+                )
             else:
                 payload = json.dumps(
                     {
                         "baseline_soc_pct": round(self.state.last_soc_for_snapshot, 2),
                         "energy_added_kwh": round(self.state.energy_added_since_soc_kwh, 4),
+                        "target_met": bool(self.state.target_met),
                     }
                 )
-        self._mqtt.publish(topics.STATUS_SOC_TRACKING, payload, qos=0, retain=True)
+        self._mqtt.publish(topics.STATUS_SOC_TRACKING, payload, qos=1, retain=True)
 
     def _maybe_snapshot_soc(self, new_soc: float) -> None:
         """When parked/OEM SOC becomes a new positive value, reset energy accrual."""
@@ -194,6 +221,7 @@ class VenAdapter:
             self.state.soc_tracking_active = False
             self.state.energy_added_since_soc_kwh = 0.0
             self.state.last_soc_for_snapshot = 0.0
+            self.state.target_met = False
             return
         # Same baseline as restore or prior snapshot (HA republishes every 15s).
         if abs(new_soc - self.state.last_soc_for_snapshot) < 0.05:
@@ -202,6 +230,7 @@ class VenAdapter:
         self.state.energy_added_since_soc_kwh = 0.0
         self.state.soc_tracking_active = True
         self.state.last_soc_for_snapshot = new_soc
+        self.state.target_met = False
         logger.info(
             "SOC tracking start soc=%.1f%% (power-integrate until next SOC change)",
             new_soc,
@@ -393,6 +422,9 @@ class VenAdapter:
         """Stop automatic modes once effective SOC meets sticky target (charge_now bypasses)."""
         if float(site["soc_pct"]) <= 0:
             return False
+        with self.state.lock:
+            if self.state.target_met:
+                return True
         rb = self.cfg.ready_by
         eff, _ = effective_soc_pct(
             float(site["soc_pct"]),
@@ -401,7 +433,7 @@ class VenAdapter:
             battery_capacity_kwh=float(site["battery_capacity_kwh"]),
             tracking_active=bool(site["soc_tracking_active"]),
         )
-        return (
+        reached = (
             energy_needed_kwh(
                 effective_soc=eff,
                 target_soc_pct=float(site["target_soc_pct"]),
@@ -409,6 +441,20 @@ class VenAdapter:
             )
             <= 0.0
         )
+        if not reached:
+            return False
+        with self.state.lock:
+            # Latch so a restart/rebuild cannot reopen charging for this parked SOC.
+            floor = self._min_energy_for_target(
+                self.state.last_soc_for_snapshot or float(site["soc_pct"]),
+                float(site["target_soc_pct"]),
+                float(site["battery_capacity_kwh"]),
+            )
+            self.state.energy_added_since_soc_kwh = max(
+                self.state.energy_added_since_soc_kwh, floor
+            )
+            self.state.target_met = True
+        return True
 
     def _publish_deadline_status(self, decision) -> None:  # noqa: ANN001
         self._mqtt.publish(
@@ -532,19 +578,22 @@ class VenAdapter:
         self._mqtt.connect(self.mqtt_host, self.mqtt_port, 60)
         self._mqtt.loop_start()
         # Let retained SOC tracking + telemetry arrive before the first amp decision.
-        time_module.sleep(1.0)
+        time_module.sleep(1.5)
         with self.state.lock:
             if not self.state.soc_tracking_restored:
                 self.state.soc_tracking_restored = True
                 logger.info("SOC tracking: no retained state on startup")
+        self._allow_soc_tracking_publish = True
         logger.info(
             "VEN adapter running interval=%ss surplus_ema_alpha=%.3f hysteresis=%.2fA "
-            "ready_by=%s assumed_soc=%.0f%%",
+            "ready_by=%s assumed_soc=%.0f%% target_met=%s added=%.3fkWh",
             self.poll_seconds,
             self.surplus_ema.alpha,
             self.amps.hysteresis_amps,
             self.cfg.ready_by.ready_by_time.strftime("%H:%M"),
             self.cfg.ready_by.assumed_soc_pct,
+            self.state.target_met,
+            self.state.energy_added_since_soc_kwh,
         )
         while not self._stop.is_set():
             try:

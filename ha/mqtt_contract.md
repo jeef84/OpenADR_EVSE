@@ -39,7 +39,7 @@ On `economic` / `solar_only`, when remaining energy cannot finish by the daily r
 
 Sticky site defaults (not per plug-in): battery **74.7 kWh**, target **85%**, ready-by **07:00** local. Per plug-in: parked SOC on `telemetry/soc_pct` (or future OEM). Missing/zero SOC uses assumed **40%** so the overlay stays active.
 
-While charging, VEN raises `status/effective_soc_pct` by integrating OpenEVSE power (`ev_kw × dt`), not the parked helper and not the often-stale OpenEVSE `/wh` meter. The parked slider stays at what you set; watch **Effective SOC** for live progress. Accrual is retained on `status/soc_tracking` so a VEN rebuild does not forget progress and restart charging.
+While charging, VEN raises `status/effective_soc_pct` by integrating OpenEVSE power (`ev_kw × dt`), not the parked helper and not the often-stale OpenEVSE `/wh` meter. The parked slider stays at what you set; watch **Effective SOC** for live progress. Accrual is retained on `status/soc_tracking` (including a `target_met` latch) so a VEN rebuild does not forget progress and restart charging.
 
 On re-plug (`openevse/status/connected` false→true), HA adjusts parked SOC from absence length:
 
