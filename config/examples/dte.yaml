@@ -31,6 +31,17 @@ export:
   # Opportunity cost of consuming solar that would otherwise export (Rider 18).
   credit_per_kwh: 0.07
 
+# Optional: Electricity Maps carbon overlay on grid import (see docs/tariff-config.md).
+# carbon_price:
+#   enabled: true
+#   unavailable_behavior: max_adder
+#   co2_intensity:
+#     threshold_g_per_kwh: 580   # permit at or below (local "good")
+#     max_adder_per_kwh: 0.50    # full adder when above
+#   fossil_fuel_pct:
+#     threshold_pct: 80
+#     max_adder_per_kwh: 0.50
+
 limits:
   panel_service_headroom_kw: 7.68
   evse_max_amps: 48

@@ -12,7 +12,7 @@ HA or MQTT fixtures → Mosquitto → tariff engine → OpenLEADR VTN → VEN �
 
 - **Tariff engine**: utility-agnostic TOU + export opportunity cost, supply curve, upserts `PRICE` + import power limit on program `HOME_EV_FLEX`.
 - **VEN**: polls events, maps price + local surplus to integer amps (floor quantization, EMA surplus smoothing, amp hysteresis). Never commands 1–5 A.
-- **openevse_bridge**: turns `openevse/cmd/current_limit` into MQTT RAPI (`$FS` / `$FC` / `$SC`).
+- **openevse_bridge**: turns `openevse/cmd/current_limit` into OpenEVSE claim/override MQTT (default `claim`; optional legacy RAPI).
 - **Config**: `config/tariff.yaml` (copy/adapt examples under `config/examples/`).
 
 ## Prerequisites
@@ -70,7 +70,7 @@ FIXTURE_SCENARIO=solar_only docker compose up mqtt-fixtures
 
 1. Point the OpenEVSE WiFi gateway at the compose Mosquitto host (or point compose Mosquitto at your existing broker).
 2. Set `OPENEVSE_MQTT_BASE` in `compose/.env` to the gateway base topic.
-3. Confirm bridge logs show `$SC` / `$FS` when the VEN commands amps.
+3. Leave OpenEVSE UI on **Auto**. Confirm bridge logs show `claim/set` (or `override/set`) when the VEN commands amps; stop should log `release` / `clear`.
 4. Keep `mqtt-fixtures` running only for lab demos. For live HA telemetry:
 
 ```bash
@@ -95,7 +95,7 @@ Topic contract: [ha/mqtt_contract.md](ha/mqtt_contract.md).
 
 | Mode | Behavior |
 | --- | --- |
-| `economic` | Accept supply-curve blocks at or below your bid; may import when TOU is cheap enough |
+| `economic` | Accept supply-curve blocks at or below your bid; may import when TOU (+ optional carbon adder) is cheap enough |
 | `solar_only` | Excess solar only (`export − import + EV`); ignores cheap grid import |
 | `charge_now` | User amp limit; ignores price |
 | `stopped` | Always 0 A |
@@ -141,7 +141,7 @@ config/examples/         # Shipped baselines (e.g. DTE) to copy and edit
 src/home_ev_flex/        # Supply curve, amps, OpenADR helpers, surplus smoothing
 services/tariff_engine/  # BL client
 services/ven_adapter/    # VEN + amp command
-services/openevse_bridge/# OpenEVSE MQTT RAPI hardware adapter
+services/openevse_bridge/# OpenEVSE claim/override (or legacy RAPI) hardware adapter
 services/mqtt_fixtures/  # Lab HA stand-in
 ha/                      # Topic contract + HA package (edit SITE CONFIG)
 tests/                   # Intent-focused unit tests

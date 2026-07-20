@@ -1,4 +1,4 @@
-"""OpenEVSE MQTT RAPI bridge: abstract current_limit -> hardware commands."""
+"""OpenEVSE MQTT bridge: abstract current_limit -> claim/override (or legacy RAPI)."""
 
 from __future__ import annotations
 
@@ -15,6 +15,9 @@ from home_ev_flex import mqtt_topics as topics
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 logger = logging.getLogger("openevse_bridge")
+
+# Preferred: claim (automation client). override mimics UI Manual. rapi is legacy.
+CONTROL_MODES = frozenset({"claim", "override", "rapi"})
 
 
 def _env(name: str, default: str | None = None) -> str:
@@ -80,6 +83,98 @@ def session_connected(*, status: str, vehicle: str | None, state: str | None) ->
     return False
 
 
+def _stop_payload(stop_mode: str, *, auto_release: bool) -> str:
+    """
+    How FLEX holds a stop.
+
+    disabled (default): keep MQTT ownership and force sleep. Needed so Auto/Eco
+    cannot resume at I_min after we give up the claim.
+    release: drop claim/override and return control to the OpenEVSE UI mode.
+    """
+    mode = stop_mode.lower().strip()
+    if mode == "release":
+        return "release"
+    if mode == "clear":
+        return "clear"
+    if mode != "disabled":
+        raise ValueError(f"unknown stop_mode {stop_mode!r}; use disabled|release|clear")
+    return json.dumps(
+        {"state": "disabled", "auto_release": auto_release},
+        separators=(",", ":"),
+    )
+
+
+def control_command(
+    mode: str,
+    amps: int,
+    *,
+    base_topic: str,
+    auto_release: bool = True,
+    stop_mode: str = "disabled",
+) -> list[tuple[str, str]]:
+    """
+    Build MQTT (topic, payload) pairs for the requested amp setpoint.
+
+    claim/override: OpenEVSE WiFi Claims / Manual Override API over MQTT.
+    On stop, both claim and override are forced quiet so a leftover MQTT claim
+    cannot keep the 6 A floor while override is cleared (or vice versa).
+    rapi: legacy $FS / $FC / $SC (fights Manual UI; keep for old firmware).
+    """
+    mode = mode.lower().strip()
+    if mode not in CONTROL_MODES:
+        raise ValueError(f"unknown OPENEVSE_CONTROL {mode!r}; expected one of {sorted(CONTROL_MODES)}")
+    base = base_topic.rstrip("/")
+
+    if mode == "rapi":
+        if amps <= 0:
+            return [(f"{base}/rapi/in/$FS", "")]
+        return [
+            (f"{base}/rapi/in/$FC", ""),
+            (f"{base}/rapi/in/$SC {amps}", ""),
+        ]
+
+    claim_topic = f"{base}/claim/set"
+    override_topic = f"{base}/override/set"
+    divert_topic = f"{base}/divertmode/set"
+    active = json.dumps(
+        {
+            "state": "active",
+            "charge_current": amps,
+            "max_current": amps,
+            "auto_release": auto_release,
+        },
+        separators=(",", ":"),
+    )
+    disabled = _stop_payload("disabled", auto_release=auto_release)
+
+    if amps <= 0:
+        if stop_mode == "release" or stop_mode == "clear":
+            return [(claim_topic, "release"), (override_topic, "clear")]
+        # Hold both channels disabled so neither Auto/Eco nor a stale claim/override
+        # can resume at I_min. Also force divert Normal so Eco cannot re-claim at 6A.
+        return [
+            (divert_topic, "1"),
+            (claim_topic, disabled),
+            (override_topic, disabled),
+        ]
+
+    if mode == "claim":
+        # Normal divert (1): Eco divert can claim at Priority_Limit (1100) and beat
+        # MQTT (500), leaving SETPOINT stuck at ~6A despite Max Current 32.
+        return [
+            (divert_topic, "1"),
+            (override_topic, "clear"),
+            (claim_topic, active),
+        ]
+
+    # override: drop MQTT claim so the UI mqtt badge cannot stick at 6 A.
+    return [
+        (divert_topic, "1"),
+        (claim_topic, "release"),
+        (override_topic, active),
+    ]
+
+
 class OpenEvseBridge:
     def __init__(self) -> None:
         self.mqtt_host = _env("MQTT_HOST", "mosquitto")
@@ -87,6 +182,19 @@ class OpenEvseBridge:
         self.base_topic = _env("OPENEVSE_MQTT_BASE", "openevse").rstrip("/")
         self.i_min = int(_env("OPENEVSE_I_MIN", "6"))
         self.i_max = int(_env("OPENEVSE_I_MAX", "48"))
+        # claim = automation client (default); override = Manual path; rapi = legacy.
+        self.control = _env("OPENEVSE_CONTROL", "claim").lower().strip()
+        if self.control not in CONTROL_MODES:
+            raise RuntimeError(
+                f"OPENEVSE_CONTROL={self.control!r} invalid; use one of {sorted(CONTROL_MODES)}"
+            )
+        self.auto_release = _env("OPENEVSE_AUTO_RELEASE", "true").lower() in {"1", "true", "yes"}
+        # disabled (default): force stop while keeping claim. release/clear: yield to Auto/Eco.
+        self.stop_mode = _env("OPENEVSE_STOP_MODE", "disabled").lower().strip()
+        if self.stop_mode not in {"disabled", "release", "clear"}:
+            raise RuntimeError(
+                f"OPENEVSE_STOP_MODE={self.stop_mode!r} invalid; use disabled|release|clear"
+            )
         # No device MQTT for this long => gateway offline; clear stale power.
         self.offline_sec = float(_env("OPENEVSE_OFFLINE_SEC", "60"))
         self._desired = 0
@@ -102,10 +210,6 @@ class OpenEvseBridge:
         self._mqtt.on_connect = self._on_connect
         self._mqtt.on_message = self._on_message
 
-    def _rapi_in(self, command: str) -> str:
-        # OpenEVSE expects the full RAPI token in the topic, e.g. .../rapi/in/$SC 16
-        return f"{self.base_topic}/rapi/in/{command}"
-
     def _device_topics(self) -> set[str]:
         base = self.base_topic
         return {
@@ -118,10 +222,17 @@ class OpenEvseBridge:
             f"{base}/time",
             f"{base}/rapi/out",
             f"{base}/pilot",
+            f"{base}/claim",
+            f"{base}/override",
         }
 
     def _on_connect(self, client, userdata, flags, reason_code, properties=None) -> None:  # noqa: ANN001
-        logger.info("MQTT connected rc=%s base=%s", reason_code, self.base_topic)
+        logger.info(
+            "MQTT connected rc=%s base=%s control=%s",
+            reason_code,
+            self.base_topic,
+            self.control,
+        )
         client.subscribe(topics.OPENEVSE_CURRENT_LIMIT)
         for topic in (*sorted(self._device_topics()), f"{self.base_topic}/announce/#"):
             client.subscribe(topic)
@@ -177,25 +288,45 @@ class OpenEvseBridge:
         if not force and amps == self._last_sent:
             return
 
+        commands = control_command(
+            self.control,
+            amps,
+            base_topic=self.base_topic,
+            auto_release=self.auto_release,
+            stop_mode=self.stop_mode,
+        )
+        for topic, payload in commands:
+            self._mqtt.publish(topic, payload, qos=1, retain=False)
         if amps <= 0:
-            topic = self._rapi_in("$FS")
-            self._mqtt.publish(topic, "", qos=1, retain=False)
-            logger.info("OpenEVSE stop via %s", topic)
+            logger.info(
+                "OpenEVSE stop via %s control=%s stop_mode=%s payloads=%s",
+                [c[0] for c in commands],
+                self.control,
+                self.stop_mode,
+                [c[1] for c in commands],
+            )
             self._last_sent = 0
             self._publish_status(applied=0)
             return
 
-        enable = self._rapi_in("$FC")
-        set_cur = self._rapi_in(f"$SC {amps}")
-        self._mqtt.publish(enable, "", qos=1, retain=False)
-        self._mqtt.publish(set_cur, "", qos=1, retain=False)
-        logger.info("OpenEVSE enable + set %s A via %s", amps, set_cur)
+        logger.info(
+            "OpenEVSE set %s A via %s control=%s payloads=%s",
+            amps,
+            [c[0] for c in commands],
+            self.control,
+            [c[1] for c in commands],
+        )
         self._last_sent = amps
         self._publish_status(applied=amps)
 
     def _on_message(self, client, userdata, msg) -> None:  # noqa: ANN001
         payload = msg.payload.decode("utf-8", errors="replace").strip()
         if msg.topic == topics.OPENEVSE_CURRENT_LIMIT:
+            # VEN retains current_limit for HA; a stale retained 32 A on bridge
+            # reconnect briefly re-enables charging. Act on live publishes only.
+            if getattr(msg, "retain", False):
+                logger.info("ignoring retained current_limit %r", payload)
+                return
             amps = normalize_amps(payload, i_min=self.i_min, i_max=self.i_max)
             self._apply(amps)
             return
@@ -239,10 +370,11 @@ class OpenEvseBridge:
         self._mqtt.connect(self.mqtt_host, self.mqtt_port, 60)
         self._mqtt.loop_start()
         logger.info(
-            "OpenEVSE bridge running host=%s:%s base=%s limits=%s-%sA offline_sec=%s",
+            "OpenEVSE bridge running host=%s:%s base=%s control=%s limits=%s-%sA offline_sec=%s",
             self.mqtt_host,
             self.mqtt_port,
             self.base_topic,
+            self.control,
             self.i_min,
             self.i_max,
             self.offline_sec,

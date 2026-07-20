@@ -29,6 +29,20 @@ import_rates:
 export:
   credit_per_kwh: 0.07
 
+# Hard permit gates for grid import (solar export-credit blocks unchanged).
+# At or below threshold → carbon adder $0 (TOU vs bid decides).
+# Above threshold → apply max_adder (blocks typical bids). Either signal can block.
+# US-MIDW-MISO local-good baseline: 580 gCO2eq/kWh, 80% fossil.
+carbon_price:
+  enabled: true
+  unavailable_behavior: max_adder  # missing MQTT → do not silently import
+  co2_intensity:
+    threshold_g_per_kwh: 580
+    max_adder_per_kwh: 0.50
+  fossil_fuel_pct:
+    threshold_pct: 80
+    max_adder_per_kwh: 0.50
+
 limits:
   panel_service_headroom_kw: 7.68
   evse_max_amps: 48
