@@ -6,6 +6,7 @@ import logging
 import os
 import signal
 import threading
+import time
 from dataclasses import dataclass, field
 
 import paho.mqtt.client as mqtt
@@ -13,10 +14,20 @@ import paho.mqtt.client as mqtt
 from home_ev_flex import mqtt_topics as topics
 from home_ev_flex.openadr import create_bl_client, ensure_program, upsert_flex_event
 from home_ev_flex.supply_curve import build_supply_curve, dispatch
-from home_ev_flex.tariff import load_tariff_config, resolve_import_price, solar_surplus_kw
+from home_ev_flex.tariff import effective_import_price, load_tariff_config, solar_surplus_kw
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 logger = logging.getLogger("tariff_engine")
+
+
+def _optional_float(payload: str) -> float | None:
+    text = payload.strip()
+    if text.lower() in ("", "unavailable", "unknown", "none", "null"):
+        return None
+    try:
+        return float(text)
+    except ValueError:
+        return None
 
 
 @dataclass
@@ -26,6 +37,8 @@ class TelemetryState:
     grid_import_kw: float = 0.0
     grid_export_kw: float = 0.0
     voltage_v: float = 240.0
+    co2_intensity_g_per_kwh: float | None = None
+    fossil_fuel_pct: float | None = None
     mode: str = "economic"
     bid_price_per_kwh: float = 0.16
     user_amp_limit: int = 32
@@ -55,6 +68,7 @@ class TariffEngine:
         self._event_id: str | None = None
         self._program_id: str | None = None
         self._bl = None
+        self._carbon_warn_mono = 0.0
         self._mqtt = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2, client_id="tariff-engine")
         self._mqtt.on_connect = self._on_connect
         self._mqtt.on_message = self._on_message
@@ -67,6 +81,8 @@ class TariffEngine:
             topics.GRID_IMPORT_KW,
             topics.GRID_EXPORT_KW,
             topics.VOLTAGE_V,
+            topics.CO2_INTENSITY,
+            topics.FOSSIL_FUEL_PCT,
             topics.MODE,
             topics.BID_PRICE,
             topics.USER_AMP_LIMIT,
@@ -74,24 +90,41 @@ class TariffEngine:
             client.subscribe(topic)
 
     def _on_message(self, client, userdata, msg) -> None:  # noqa: ANN001
-        payload = msg.payload.decode("utf-8").strip()
-        with self.state.lock:
-            if msg.topic == topics.SOLAR_KW:
-                self.state.solar_kw = float(payload)
-            elif msg.topic == topics.HOUSE_LOAD_KW:
-                self.state.house_load_kw = float(payload)
-            elif msg.topic == topics.GRID_IMPORT_KW:
-                self.state.grid_import_kw = float(payload)
-            elif msg.topic == topics.GRID_EXPORT_KW:
-                self.state.grid_export_kw = float(payload)
-            elif msg.topic == topics.VOLTAGE_V:
-                self.state.voltage_v = float(payload)
-            elif msg.topic == topics.MODE:
-                self.state.mode = payload.lower()
-            elif msg.topic == topics.BID_PRICE:
-                self.state.bid_price_per_kwh = float(payload)
-            elif msg.topic == topics.USER_AMP_LIMIT:
-                self.state.user_amp_limit = int(float(payload))
+        # HA can briefly publish "unavailable" when FLEX is toggled; never let that
+        # kill the paho network thread (float('unavailable') used to do exactly that).
+        try:
+            payload = msg.payload.decode("utf-8").strip()
+            with self.state.lock:
+                if msg.topic == topics.MODE:
+                    self.state.mode = payload.lower()
+                    return
+                if msg.topic == topics.CO2_INTENSITY:
+                    self.state.co2_intensity_g_per_kwh = _optional_float(payload)
+                    return
+                if msg.topic == topics.FOSSIL_FUEL_PCT:
+                    self.state.fossil_fuel_pct = _optional_float(payload)
+                    return
+
+                value = _optional_float(payload)
+                if value is None:
+                    logger.warning("ignoring non-numeric MQTT %s payload=%r", msg.topic, payload)
+                    return
+                if msg.topic == topics.SOLAR_KW:
+                    self.state.solar_kw = value
+                elif msg.topic == topics.HOUSE_LOAD_KW:
+                    self.state.house_load_kw = value
+                elif msg.topic == topics.GRID_IMPORT_KW:
+                    self.state.grid_import_kw = value
+                elif msg.topic == topics.GRID_EXPORT_KW:
+                    self.state.grid_export_kw = value
+                elif msg.topic == topics.VOLTAGE_V:
+                    self.state.voltage_v = value
+                elif msg.topic == topics.BID_PRICE:
+                    self.state.bid_price_per_kwh = value
+                elif msg.topic == topics.USER_AMP_LIMIT:
+                    self.state.user_amp_limit = int(value)
+        except Exception:  # noqa: BLE001
+            logger.exception("MQTT handler failed topic=%s", getattr(msg, "topic", "?"))
 
     def _ensure_vtn(self) -> None:
         if self._bl is None:
@@ -113,9 +146,27 @@ class TariffEngine:
             bid = self.state.bid_price_per_kwh
             user_amps = self.state.user_amp_limit
             voltage = self.state.voltage_v
+            co2 = self.state.co2_intensity_g_per_kwh
+            fossil = self.state.fossil_fuel_pct
 
         now = datetime.now().astimezone()
-        import_price = resolve_import_price(self.cfg, now)
+        import_price, carbon_adder, carbon_reason = effective_import_price(
+            self.cfg,
+            now,
+            co2_intensity_g_per_kwh=co2,
+            fossil_fuel_pct=fossil,
+        )
+        if self.cfg.carbon_price.enabled and carbon_reason.startswith("unavailable"):
+            now_mono = time.monotonic()
+            if now_mono - self._carbon_warn_mono >= 60.0:
+                logger.warning(
+                    "carbon_price enabled but Electricity Maps MQTT missing (%s); "
+                    "co2=%s fossil%%=%s (retrying; warn at most once/min)",
+                    carbon_reason,
+                    co2,
+                    fossil,
+                )
+                self._carbon_warn_mono = now_mono
         surplus = solar_surplus_kw(solar_kw=solar, house_load_kw=house)
         limits = self.cfg.limits
         user_kw = (user_amps * voltage) / 1000.0
@@ -154,17 +205,24 @@ class TariffEngine:
                 "" if result.effective_marginal_price is None else f"{result.effective_marginal_price:.6f}"
             ),
             topics.STATUS_IMPORT_LIMIT_KW: f"{result.import_power_limit_kw:.4f}",
+            topics.STATUS_CARBON_ADDER: f"{carbon_adder:.6f}",
+            topics.STATUS_EFFECTIVE_IMPORT_PRICE: f"{import_price:.6f}",
         }
         for topic, value in status.items():
             self._mqtt.publish(topic, value, qos=0, retain=True)
 
         logger.info(
-            "dispatch accepted=%.3f kW price=%s import_limit=%.3f surplus=%.3f import_tou=%.3f",
+            "dispatch accepted=%.3f kW price=%s import_limit=%.3f surplus=%.3f "
+            "import_eff=%.3f carbon_adder=%.3f (%s) co2=%s fossil%%=%s",
             result.accepted_power_kw,
             result.effective_marginal_price,
             result.import_power_limit_kw,
             surplus,
             import_price,
+            carbon_adder,
+            carbon_reason,
+            co2,
+            fossil,
         )
 
     def run(self) -> None:

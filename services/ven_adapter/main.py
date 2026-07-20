@@ -49,6 +49,16 @@ def _env(name: str, default: str | None = None) -> str:
     return value
 
 
+def _optional_float(payload: str) -> float | None:
+    text = payload.strip()
+    if text.lower() in ("", "unavailable", "unknown", "none", "null"):
+        return None
+    try:
+        return float(text)
+    except ValueError:
+        return None
+
+
 class VenAdapter:
     def __init__(self) -> None:
         self.tariff_path = _env("TARIFF_CONFIG", "/config/tariff.yaml")
@@ -93,28 +103,37 @@ class VenAdapter:
             client.subscribe(topic)
 
     def _on_message(self, client, userdata, msg) -> None:  # noqa: ANN001
-        payload = msg.payload.decode("utf-8").strip()
-        with self.state.lock:
-            if msg.topic == topics.MODE:
-                self.state.mode = payload.lower()
-            elif msg.topic == topics.BID_PRICE:
-                self.state.bid_price_per_kwh = float(payload)
-            elif msg.topic == topics.USER_AMP_LIMIT:
-                self.state.user_amp_limit = int(float(payload))
-            elif msg.topic == topics.VOLTAGE_V:
-                self.state.voltage_v = float(payload)
-            elif msg.topic == topics.SOLAR_KW:
-                self.state.solar_kw = float(payload)
-            elif msg.topic == topics.HOUSE_LOAD_KW:
-                self.state.house_load_kw = float(payload)
-            elif msg.topic == topics.GRID_IMPORT_KW:
-                self.state.grid_import_kw = float(payload)
-            elif msg.topic == topics.GRID_EXPORT_KW:
-                self.state.grid_export_kw = float(payload)
-            elif msg.topic == topics.OPENEVSE_POWER_KW:
-                self.state.actual_power_kw = float(payload)
-            elif msg.topic == topics.OPENEVSE_ENERGY_KWH:
-                self.state.energy_kwh = float(payload)
+        # Keep last good value when HA publishes "unavailable"; never crash paho.
+        try:
+            payload = msg.payload.decode("utf-8").strip()
+            with self.state.lock:
+                if msg.topic == topics.MODE:
+                    self.state.mode = payload.lower()
+                    return
+                value = _optional_float(payload)
+                if value is None:
+                    logger.warning("ignoring non-numeric MQTT %s payload=%r", msg.topic, payload)
+                    return
+                if msg.topic == topics.BID_PRICE:
+                    self.state.bid_price_per_kwh = value
+                elif msg.topic == topics.USER_AMP_LIMIT:
+                    self.state.user_amp_limit = int(value)
+                elif msg.topic == topics.VOLTAGE_V:
+                    self.state.voltage_v = value
+                elif msg.topic == topics.SOLAR_KW:
+                    self.state.solar_kw = value
+                elif msg.topic == topics.HOUSE_LOAD_KW:
+                    self.state.house_load_kw = value
+                elif msg.topic == topics.GRID_IMPORT_KW:
+                    self.state.grid_import_kw = value
+                elif msg.topic == topics.GRID_EXPORT_KW:
+                    self.state.grid_export_kw = value
+                elif msg.topic == topics.OPENEVSE_POWER_KW:
+                    self.state.actual_power_kw = value
+                elif msg.topic == topics.OPENEVSE_ENERGY_KWH:
+                    self.state.energy_kwh = value
+        except Exception:  # noqa: BLE001
+            logger.exception("MQTT handler failed topic=%s", getattr(msg, "topic", "?"))
 
     def _ensure_ven(self) -> None:
         if self._ven is None:

@@ -11,7 +11,7 @@ HA telemetry/controls -> Mosquitto -> tariff engine -> VTN -> VEN
                                          openevse/cmd/current_limit
                                                       |
                                                       v
-                                         openevse_bridge (MQTT RAPI $FS / $FC / $SC)
+                                         openevse_bridge (claim/override MQTT; optional RAPI)
                                                       |
                                                       v
                                                    OpenEVSE
@@ -43,12 +43,22 @@ control paths isolated so two automations do not fight over the same EVSE.
 | `openevse/status/applied_current_limit` | bridge → HA | Last applied setpoint |
 | `openevse/status/connected` | bridge → HA | Vehicle/EVSE session connected |
 
-Bridge RAPI mapping (configurable base topic, default `openevse`):
+Bridge hardware mapping (`OPENEVSE_CONTROL`, default `claim`; base topic default `openevse`):
 
-| Commanded amps | MQTT RAPI |
-| --- | --- |
-| 0 (or 1–5 / invalid) | `{base}/rapi/in/$FS` |
-| ≥ 6 | `{base}/rapi/in/$FC` then `{base}/rapi/in/$SC {n}` |
+| Commanded amps | `claim` (default) | `override` | `rapi` (legacy) |
+| --- | --- | --- | --- |
+| 0 (or 1–5 / invalid) | disable **both** `{base}/claim/set` and `{base}/override/set` with `{"state":"disabled",…}` | same dual disable | `{base}/rapi/in/$FS` |
+| ≥ 6 | clear override, then claim `active` + amps | release claim, then override `active` + amps | `$FC` then `$SC {n}` |
+
+Stop always quiets **both** claim and override so a leftover MQTT claim cannot hold the 6 A floor after an override-only clear (the failure mode behind a persistent UI `mqtt` badge at 6 A).
+
+FLEX also publishes `{base}/divertmode/set` → `1` (Normal) on charge/stop. OpenEVSE **Eco divert** can claim at priority 1100 and beat MQTT (500), which leaves **SETPOINT at ~6 A** while **Max Current** stays 32 A. This OpenEVSE is FLEX-owned; leave gateway divert on Normal / Fast, not Eco. Enphase Soleil can still do solar follow on its own charger.
+
+The bridge ignores **retained** `openevse/cmd/current_limit` (HA convenience retain); only live VEN publishes change hardware. That avoids a brief stale 32 A pulse on bridge reconnect.
+
+`OPENEVSE_STOP_MODE=disabled` (default) keeps FLEX ownership while forcing sleep. `release` / `clear` yields both channels to Auto/Eco and can leave the EVSE charging at the 6 A floor.
+
+Leave the OpenEVSE UI on **Auto**. Prefer `claim` so the UI Manual button can still interrupt FLEX. Use `override` only if you want FLEX to own the Manual path. Avoid `rapi` on modern firmware; it fights Manual/Auto.
 
 Set `OPENEVSE_MQTT_BASE` in `compose/.env` to match the OpenEVSE WiFi gateway.
 
@@ -68,7 +78,32 @@ Set `OPENEVSE_MQTT_BASE` in `compose/.env` to match the OpenEVSE WiFi gateway.
 | `home_ev_flex/telemetry/house_load_kw` | solar + import − export − OpenEVSE kW |
 | `home_ev_flex/telemetry/grid_*_kw` | Site grid CT / meter sensors |
 | `home_ev_flex/telemetry/voltage_v` | `input_number.home_ev_flex_voltage_v` |
+| `home_ev_flex/telemetry/co2_intensity_g_per_kwh` | Electricity Maps CO2 intensity (when available) |
+| `home_ev_flex/telemetry/fossil_fuel_pct` | Electricity Maps fossil fuel % (when available) |
 | `home_ev_flex/control/*` | helpers above |
+
+### Carbon-priced import (optional)
+
+When `carbon_price.enabled` is true in `config/tariff.yaml`, the tariff engine adds a
+$/kWh overlay to the **grid_import** supply-curve block only:
+
+`effective_import = TOU_import + max(co2_adder, fossil_adder)`
+
+Each signal is a hard permit gate: at or below threshold → adder $0; above →
+`max_adder_per_kwh`. Solar export-credit blocks are unchanged. Your bid still decides
+acceptance when the gate permits.
+
+Status topics (tariff engine → HA):
+
+| Topic | Meaning |
+| --- | --- |
+| `home_ev_flex/status/carbon_adder_per_kwh` | Active carbon overlay ($/kWh) |
+| `home_ev_flex/status/effective_import_price_per_kwh` | TOU + carbon adder |
+
+If carbon is enabled and no MQTT reading has arrived, `unavailable_behavior: max_adder`
+(default) applies the configured max adder so the stack does not silently import on a
+dirty or unknown grid. HA only publishes Electricity Maps values when the sensors are
+available (last retained value is kept).
 
 VEN derives solar-only surplus as `export − import + EV` (not a raw solar−house MQTT pair).
 

@@ -18,6 +18,7 @@ from openadr3_client.version import OADRVersion
 logger = logging.getLogger(__name__)
 
 PROGRAM_NAME = "HOME_EV_FLEX"
+ACTIVE_EVENT_NAME = "home-ev-flex-active"
 
 # Plan concept IMPORT_POWER_LIMIT maps to OpenADR 3.1 IMPORT_CAPACITY_LIMIT (kW).
 PRICE_TYPE = EventPayloadType.PRICE
@@ -122,6 +123,67 @@ def ensure_program(bl_client: Any) -> str:
     return created.id
 
 
+def _event_id(event: Any) -> str | None:
+    event_id = getattr(event, "id", None)
+    if event_id:
+        return str(event_id)
+    raw = event.model_dump(by_alias=True) if hasattr(event, "model_dump") else {}
+    value = raw.get("id")
+    return str(value) if value else None
+
+
+def _event_start(event: Any) -> datetime:
+    """Newest-event sort key: interval start, else createdDateTime, else aware min."""
+    period = getattr(event, "interval_period", None)
+    start = getattr(period, "start", None) if period is not None else None
+    if isinstance(start, datetime):
+        return start if start.tzinfo else start.replace(tzinfo=UTC)
+    raw = event.model_dump(by_alias=True) if hasattr(event, "model_dump") else {}
+    created = raw.get("createdDateTime")
+    if isinstance(created, datetime):
+        return created if created.tzinfo else created.replace(tzinfo=UTC)
+    return datetime.min.replace(tzinfo=UTC)
+
+
+def _extract_flex_payloads(event: Any) -> dict[str, float | None]:
+    price: float | None = None
+    import_limit: float | None = None
+    for interval in event.intervals or ():
+        for payload in interval.payloads or ():
+            values = payload.values or ()
+            if not values:
+                continue
+            value = float(values[0])
+            type_str = str(payload.type)
+            if type_str == "PRICE":
+                price = value
+            elif type_str in {"IMPORT_CAPACITY_LIMIT", "IMPORT_POWER_LIMIT"}:
+                import_limit = value
+    return {"price": price, "import_power_limit_kw": import_limit}
+
+
+def list_flex_events(client: Any, *, program_id: str | None = None) -> list[Any]:
+    """Return HOME_EV_FLEX active events (falls back to all events if unnamed)."""
+    events = list(client.events.get_events(target=None, pagination=None, program_id=program_id) or ())
+    named = [e for e in events if getattr(e, "event_name", None) == ACTIVE_EVENT_NAME]
+    return named if named else events
+
+
+def purge_flex_events(bl_client: Any, *, program_id: str | None = None) -> int:
+    """Delete all HOME_EV_FLEX active events. Returns delete attempt count."""
+    deleted = 0
+    for event in list_flex_events(bl_client, program_id=program_id):
+        event_id = _event_id(event)
+        if not event_id:
+            continue
+        try:
+            bl_client.events.delete_event_by_id(event_id=event_id)
+            deleted += 1
+        except Exception:  # noqa: BLE001 — best-effort cleanup
+            logger.warning("Could not delete flex event %s", event_id, exc_info=True)
+    return deleted
+
+
 def upsert_flex_event(
     bl_client: Any,
     *,
@@ -136,12 +198,15 @@ def upsert_flex_event(
 
     When marginal_price is None (no accepted blocks), publish PRICE as a high
     sentinel so the VEN stays off unless Charge Now is active.
+
+    Purges every prior home-ev-flex-active event for this program so restarts
+    cannot leave stale cheap PRICE + import-limit events for the VEN to read.
     """
     price = 999.0 if marginal_price is None else marginal_price
     start = datetime.now(tz=UTC)
     event = NewEvent(
         program_id=program_id,
-        event_name="home-ev-flex-active",
+        event_name=ACTIVE_EVENT_NAME,
         priority=1,
         payload_descriptors=_payload_descriptors(),
         interval_period=IntervalPeriod(start=start, duration=duration),
@@ -157,7 +222,9 @@ def upsert_flex_event(
         ),
     )
 
-    if existing_event_id:
+    # Prefer full purge: existing_event_id alone loses orphans after engine restart.
+    purged = purge_flex_events(bl_client, program_id=program_id)
+    if existing_event_id and purged == 0:
         try:
             bl_client.events.delete_event_by_id(event_id=existing_event_id)
         except Exception:  # noqa: BLE001 — best-effort replace
@@ -168,22 +235,14 @@ def upsert_flex_event(
 
 
 def read_active_flex_signals(ven_client: Any, *, program_id: str | None = None) -> dict[str, float | None]:
-    """Poll VTN events and extract PRICE ($/kWh) and import capacity limit (kW)."""
-    events = ven_client.events.get_events(target=None, pagination=None, program_id=program_id)
-    price: float | None = None
-    import_limit: float | None = None
+    """
+    Poll VTN and return PRICE / import limit from the newest flex event only.
 
-    for event in events:
-        for interval in event.intervals or ():
-            for payload in interval.payloads or ():
-                values = payload.values or ()
-                if not values:
-                    continue
-                value = float(values[0])
-                type_str = str(payload.type)
-                if type_str == "PRICE":
-                    price = value
-                elif type_str in {"IMPORT_CAPACITY_LIMIT", "IMPORT_POWER_LIMIT"}:
-                    import_limit = value
-
-    return {"price": price, "import_power_limit_kw": import_limit}
+    Walking every event and keeping the last PRICE seen is wrong when older
+    uneconomic or pre-carbon events are still within their 15-minute window.
+    """
+    events = list_flex_events(ven_client, program_id=program_id)
+    if not events:
+        return {"price": None, "import_power_limit_kw": None}
+    newest = max(events, key=_event_start)
+    return _extract_flex_payloads(newest)
