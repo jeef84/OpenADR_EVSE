@@ -100,7 +100,8 @@ SCENARIOS = {
             topics.GRID_EXPORT_KW: "0.8",
         }
     ),
-    # Carbon/price would idle; ready-by overdue + assumed SOC → deadline_force.
+    # Carbon/price would idle; next ready-by too soon for assumed SOC → deadline_force
+    # (VEN only forces while currently off-peak; run this scenario outside weekday on-peak).
     "deadline_force": _base(
         **{
             topics.MODE: "economic",
@@ -115,8 +116,8 @@ SCENARIOS = {
 
 
 def _deadline_force_ready_by_hhmm(*, timezone_name: str = "America/Detroit") -> str:
-    """Publish a ready-by clock already past in site TZ so overlay is overdue."""
-    local = datetime.now(ZoneInfo(timezone_name)) - timedelta(hours=1)
+    """Publish a ready-by ~30 min ahead so needed energy cannot finish in time."""
+    local = datetime.now(ZoneInfo(timezone_name)) + timedelta(minutes=30)
     return local.strftime("%H:%M")
 
 

@@ -1,4 +1,4 @@
-"""Ready-by-departure overlay: force when slack is gone so carbon cannot leave the car unready."""
+"""Ready-by-departure overlay: force on off-peak when slack is gone."""
 
 from __future__ import annotations
 
@@ -14,11 +14,14 @@ from home_ev_flex.deadline import (
     energy_needed_kwh,
     evaluate_deadline,
     hours_until_ready_by_clock,
+    off_peak_hours_until,
     parse_ready_by_hhmm,
 )
 from home_ev_flex.tariff import load_tariff_config
 
 TZ = "America/Detroit"
+ON_PEAK_START = time(11, 0)
+ON_PEAK_END = time(19, 0)
 
 
 def _local(year: int, month: int, day: int, hour: int, minute: int = 0) -> datetime:
@@ -41,6 +44,8 @@ def _deadline(**kwargs):
         user_amps=32,
         i_max_amps=40,
         voltage_v=240.0,
+        on_peak_start=ON_PEAK_START,
+        on_peak_end=ON_PEAK_END,
     )
     defaults.update(kwargs)
     return evaluate_deadline(**defaults)
@@ -95,27 +100,67 @@ def test_hours_until_ready_by_before_clock() -> None:
     assert hours == pytest.approx(6.0)
 
 
-def test_hours_until_ready_by_past_clock_is_overdue_zero() -> None:
-    """Why: past ready-by with unmet energy must not wait until tomorrow."""
+def test_hours_until_ready_by_past_clock_rolls_to_tomorrow() -> None:
+    """Why: after 07:00, daytime plug-in must aim at tomorrow, not force all day."""
     now = _local(2026, 7, 20, 8, 0)
     hours = hours_until_ready_by_clock(now, time(7, 0), timezone=TZ)
-    assert hours == pytest.approx(0.0)
+    assert hours == pytest.approx(23.0)
 
 
-def test_force_when_slack_gone_even_if_price_would_idle() -> None:
-    """Why: carbon-inflated import must not strand the car before departure."""
-    # At 6:00, need ~2 h at 32 A / 240 V (~7.68 kW) for ~15.3 kWh → force.
+def test_off_peak_hours_skips_weekday_on_peak() -> None:
+    """Why: slack must ignore on-peak so force never budgets peak imports."""
+    # Mon 10:00 → Tue 07:00: 1h before peak + 12h overnight = 13h off-peak.
+    now = _local(2026, 7, 20, 10, 0)
+    until = _local(2026, 7, 21, 7, 0)
+    hours = off_peak_hours_until(
+        now,
+        until,
+        timezone=TZ,
+        on_peak_start=ON_PEAK_START,
+        on_peak_end=ON_PEAK_END,
+    )
+    assert hours == pytest.approx(13.0)
+
+
+def test_force_when_off_peak_slack_gone() -> None:
+    """Why: carbon/price must not strand the car when off-peak window is too short."""
+    # At 6:00 off-peak, need ~2 h for ~15.3 kWh; only 1 h until 07:00 → force.
     decision = _deadline(soc_pct=50.0, now=_local(2026, 7, 20, 6, 0))
     assert decision.energy_needed_kwh > 0
     assert decision.force is True
     assert decision.reason == "force"
 
 
-def test_assumed_soc_can_still_force_when_overdue() -> None:
-    """Why: forgetting parked SOC must still force when the clock has passed."""
+def test_no_force_in_afternoon_when_overnight_off_peak_has_slack() -> None:
+    """Why: Mon 17:00 on-peak must not force; overnight off-peak covers ~1 kWh."""
+    decision = _deadline(
+        soc_pct=83.0,
+        energy_added_kwh=0.357,
+        now=_local(2026, 7, 20, 17, 0),
+    )
+    assert decision.force is False
+    assert decision.reason != "force"
+    assert decision.slack_hours > 1.0
+
+
+def test_tight_slack_during_on_peak_waits() -> None:
+    """Why: never deadline_force grid import during weekday on-peak."""
+    # Huge need vs remaining overnight off-peak, but it is still 14:00 on-peak.
+    decision = _deadline(
+        soc_pct=10.0,
+        now=_local(2026, 7, 20, 14, 0),
+        user_amps=6,
+    )
+    assert decision.force is False
+    assert decision.reason == "force_wait_off_peak"
+
+
+def test_assumed_soc_still_forces_when_off_peak_window_is_tight() -> None:
+    """Why: missing parked SOC must still force in off-peak when the window is short."""
+    # 03:00 off-peak; assumed 40% → ~4.4 h needed; until 07:00 = 4 h off-peak → force.
     decision = _deadline(
         soc_pct=0.0,
-        now=_local(2026, 7, 20, 8, 0),
+        now=_local(2026, 7, 20, 3, 0),
         soc_tracking_active=False,
     )
     assert decision.soc_assumed is True
@@ -123,10 +168,10 @@ def test_assumed_soc_can_still_force_when_overdue() -> None:
     assert decision.reason == "force"
 
 
-def test_no_force_when_plenty_of_slack() -> None:
-    """Why: with hours of slack, prefer economic/solar (overlay stays quiet)."""
+def test_no_force_when_plenty_of_off_peak_slack() -> None:
+    """Why: with hours of off-peak slack, prefer economic/solar (overlay stays quiet)."""
     decision = _deadline(soc_pct=80.0, now=_local(2026, 7, 20, 1, 0))
-    # ~3.7 kWh / 7.68 kW ≈ 0.48 h; until 07:00 = 6 h → slack ~5.5 > cushion
+    # ~3.7 kWh / 7.68 kW ≈ 0.48 h; off-peak until 07:00 = 6 h → slack ~5.5 > cushion
     assert decision.force is False
     assert decision.reason == "ok"
 

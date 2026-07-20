@@ -35,7 +35,7 @@ control paths isolated so two automations do not fight over the same EVSE.
 
 ### Ready-by-departure overlay
 
-On `economic` / `solar_only`, when remaining energy cannot finish by the daily ready-by clock, VEN force-charges at `user_amp_limit` (ignores price/carbon). Hard amp limits still apply. Once effective SOC reaches the sticky target, those modes command **0 A** (`charge_now` still bypasses the target ceiling).
+On `economic` / `solar_only`, when remaining energy cannot finish in the remaining **off-peak** hours before the **next** daily ready-by clock (tomorrow if today’s time has already passed), VEN force-charges at `user_amp_limit` (ignores bid/carbon). Never forces weekday on-peak grid import (`deadline_reason=force_wait_off_peak`); solar/economic continue until off-peak. Hard amp limits still apply. Once effective SOC reaches the sticky target, those modes command **0 A** (`charge_now` still bypasses the target ceiling).
 
 Sticky site defaults (not per plug-in): battery **74.7 kWh**, target **85%**, ready-by **07:00** local. Per plug-in: parked SOC on `telemetry/soc_pct` (or future OEM). Missing/zero SOC uses assumed **40%** so the overlay stays active.
 
@@ -61,7 +61,7 @@ On re-plug (`openevse/status/connected` false→true), HA adjusts parked SOC fro
 | `home_ev_flex/status/energy_needed_kwh` | VEN → HA | Remaining energy |
 | `home_ev_flex/status/slack_hours` | VEN → HA | Slack before ready-by |
 | `home_ev_flex/status/deadline_force_active` | VEN → HA | `true` when forcing |
-| `home_ev_flex/status/deadline_reason` | VEN → HA | `ok` / `force` / `soc_assumed` / `inactive` |
+| `home_ev_flex/status/deadline_reason` | VEN → HA | `ok` / `force` / `force_wait_off_peak` / `soc_assumed` / `inactive` |
 
 ## Abstract command contract
 

@@ -222,7 +222,7 @@ mqtt-fixtures --host localhost --scenario below_imin --once
 | `charge_now` | User amp limit (24 A); ignores price |
 | `stopped` | Always 0 A |
 | `below_imin` | Surplus maps below 6 A → stop |
-| `deadline_force` | Dirty grid + overdue ready-by → force charge despite carbon |
+| `deadline_force` | Dirty grid + ready-by too soon (run off-peak) → force despite carbon |
 
 ---
 
@@ -281,7 +281,7 @@ Full topic contract: [ha/mqtt_contract.md](ha/mqtt_contract.md).
 | `charge_now` | User amp limit; ignores price |
 | `stopped` | Always 0 A |
 
-**Ready-by overlay** (on `economic` / `solar_only`): when energy needed cannot finish by the daily ready-by clock, VEN force-charges at the user amp limit (ignores price/carbon). Sticky defaults: 74.7 kWh, 85% target, 07:00. Missing SOC assumes 40%. Once effective SOC reaches the sticky target, automatic modes stop (`charge_now` still bypasses).
+**Ready-by overlay** (on `economic` / `solar_only`): when energy needed cannot finish in the remaining **off-peak** hours before the next daily ready-by clock (rolls to tomorrow after today’s time passes), VEN force-charges at the user amp limit (ignores bid/carbon). Never forces during weekday on-peak; solar/economic keep running until off-peak. Sticky defaults: 74.7 kWh, 85% target, 07:00. Missing SOC assumes 40%. Once effective SOC reaches the sticky target, automatic modes stop (`charge_now` still bypasses).
 
 VEN never commands 1-5 A: anything below `i_min_amps` (default 6) becomes a stop.
 
