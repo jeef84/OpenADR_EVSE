@@ -28,10 +28,40 @@ control paths isolated so two automations do not fight over the same EVSE.
 
 | Mode | VEN behavior |
 | --- | --- |
-| `economic` | Charge from supply-curve / OpenADR price + import limit |
-| `solar_only` | Excess solar only via VEN `export − import + EV` (EMA-smoothed; ignores IMPORT_POWER_LIMIT) |
+| `economic` | Charge from supply-curve / OpenADR price + import limit; ready-by overlay may force |
+| `solar_only` | Excess solar only via VEN `export − import + EV` (EMA-smoothed; ignores IMPORT_POWER_LIMIT); ready-by overlay may force |
 | `charge_now` | Integer user amp limit (ignores price) |
 | `stopped` | Always command **0 A** |
+
+### Ready-by-departure overlay
+
+On `economic` / `solar_only`, when remaining energy cannot finish by the daily ready-by clock, VEN force-charges at `user_amp_limit` (ignores price/carbon). Hard amp limits still apply. Once effective SOC reaches the sticky target, those modes command **0 A** (`charge_now` still bypasses the target ceiling).
+
+Sticky site defaults (not per plug-in): battery **74.7 kWh**, target **85%**, ready-by **07:00** local. Per plug-in: parked SOC on `telemetry/soc_pct` (or future OEM). Missing/zero SOC uses assumed **40%** so the overlay stays active.
+
+While charging, VEN raises `status/effective_soc_pct` by integrating OpenEVSE power (`ev_kw × dt`), not the parked helper and not the often-stale OpenEVSE `/wh` meter. The parked slider stays at what you set; watch **Effective SOC** for live progress. Accrual is retained on `status/soc_tracking` (including a `target_met` latch) so a VEN rebuild does not forget progress and restart charging.
+
+On re-plug (`openevse/status/connected` false→true), HA adjusts parked SOC from absence length:
+
+| Gone | Parked SOC |
+| --- | --- |
+| ≤ 30 min | keep previous |
+| 30–45 min | subtract 5 kWh (as % of battery capacity) |
+| 45–60 min | subtract 10 kWh |
+| > 60 min | set to **40%** |
+
+| Topic | Direction | Meaning |
+| --- | --- | --- |
+| `home_ev_flex/telemetry/soc_pct` | HA → VEN | Per-session SOC % |
+| `home_ev_flex/control/target_soc_pct` | HA → VEN | Sticky target % |
+| `home_ev_flex/control/battery_capacity_kwh` | HA → VEN | Sticky pack kWh |
+| `home_ev_flex/control/ready_by_time` | HA → VEN | Sticky daily `HH:MM` |
+| `home_ev_flex/control/ready_by_enabled` | HA → VEN | Overlay master (`true`/`false`) |
+| `home_ev_flex/status/effective_soc_pct` | VEN → HA | Tracked / assumed SOC |
+| `home_ev_flex/status/energy_needed_kwh` | VEN → HA | Remaining energy |
+| `home_ev_flex/status/slack_hours` | VEN → HA | Slack before ready-by |
+| `home_ev_flex/status/deadline_force_active` | VEN → HA | `true` when forcing |
+| `home_ev_flex/status/deadline_reason` | VEN → HA | `ok` / `force` / `soc_assumed` / `inactive` |
 
 ## Abstract command contract
 
@@ -65,9 +95,15 @@ Set `OPENEVSE_MQTT_BASE` in `compose/.env` to match the OpenEVSE WiFi gateway.
 ## HA helpers
 
 - `input_boolean.home_ev_flex_enabled`
+- `input_boolean.home_ev_flex_ready_by_enabled` (default on)
 - `input_number.home_ev_flex_bid_price`
 - `input_number.home_ev_flex_user_amp_limit` (6–48)
 - `input_number.home_ev_flex_voltage_v`
+- `input_number.home_ev_flex_parked_soc` (per plug-in; 0 → VEN assumes 40%; auto-adjusted on re-plug by absence)
+- `input_number.home_ev_flex_target_soc` (sticky; default 85)
+- `input_number.home_ev_flex_battery_capacity_kwh` (sticky; default 74.7)
+- `input_datetime.home_ev_flex_ready_by_time` (sticky daily clock; default 07:00)
+- `input_datetime.home_ev_flex_unplugged_time` (set on disconnect for SOC adjust)
 - `input_select.home_ev_flex_mode`: `economic`, `solar_only`, `charge_now`, `stopped`
 
 ## Telemetry HA publishes
@@ -78,6 +114,7 @@ Set `OPENEVSE_MQTT_BASE` in `compose/.env` to match the OpenEVSE WiFi gateway.
 | `home_ev_flex/telemetry/house_load_kw` | solar + import − export − OpenEVSE kW |
 | `home_ev_flex/telemetry/grid_*_kw` | Site grid CT / meter sensors |
 | `home_ev_flex/telemetry/voltage_v` | `input_number.home_ev_flex_voltage_v` |
+| `home_ev_flex/telemetry/soc_pct` | Parked SOC helper (or future OEM entity) |
 | `home_ev_flex/telemetry/co2_intensity_g_per_kwh` | Electricity Maps CO2 intensity (when available) |
 | `home_ev_flex/telemetry/fossil_fuel_pct` | Electricity Maps fossil fuel % (when available) |
 | `home_ev_flex/control/*` | helpers above |
@@ -113,4 +150,4 @@ VEN derives solar-only surplus as `export − import + EV` (not a raw solar−ho
 docker compose -f compose/docker-compose.yml stop mqtt-fixtures
 ```
 
-Scenarios: `worked_stack`, `solar_only`, `charge_now`, `stopped`, `below_imin`.
+Scenarios: `worked_stack`, `solar_only`, `charge_now`, `stopped`, `below_imin`, `deadline_force`.

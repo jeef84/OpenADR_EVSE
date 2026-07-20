@@ -11,12 +11,19 @@ VOLTAGE_V = f"{PREFIX}/telemetry/voltage_v"
 # Electricity Maps (or equivalent) grid dirtiness for carbon-priced import
 CO2_INTENSITY = f"{PREFIX}/telemetry/co2_intensity_g_per_kwh"
 FOSSIL_FUEL_PCT = f"{PREFIX}/telemetry/fossil_fuel_pct"
+# Per-session SOC % (manual HA helper or future OEM sensor on the same topic)
+SOC_PCT = f"{PREFIX}/telemetry/soc_pct"
 
 # User controls from HA helpers
 # Mode published by HA: economic | solar_only | charge_now | stopped
 MODE = f"{PREFIX}/control/mode"
 BID_PRICE = f"{PREFIX}/control/bid_price_per_kwh"
 USER_AMP_LIMIT = f"{PREFIX}/control/user_amp_limit"
+# Sticky ready-by defaults (not per plug-in); VEN seeds from tariff.yaml if absent
+TARGET_SOC_PCT = f"{PREFIX}/control/target_soc_pct"
+BATTERY_CAPACITY_KWH = f"{PREFIX}/control/battery_capacity_kwh"
+READY_BY_TIME = f"{PREFIX}/control/ready_by_time"  # HH:MM local
+READY_BY_ENABLED = f"{PREFIX}/control/ready_by_enabled"  # true|false
 
 # Status mirrored by services for HA dashboards
 STATUS_TARGET_AMPS = f"{PREFIX}/status/target_amps"
@@ -28,6 +35,13 @@ STATUS_MODE = f"{PREFIX}/status/mode"
 STATUS_EVENT_ACCEPTED = f"{PREFIX}/status/event_accepted"
 STATUS_CARBON_ADDER = f"{PREFIX}/status/carbon_adder_per_kwh"
 STATUS_EFFECTIVE_IMPORT_PRICE = f"{PREFIX}/status/effective_import_price_per_kwh"
+STATUS_EFFECTIVE_SOC_PCT = f"{PREFIX}/status/effective_soc_pct"
+STATUS_ENERGY_NEEDED_KWH = f"{PREFIX}/status/energy_needed_kwh"
+STATUS_SLACK_HOURS = f"{PREFIX}/status/slack_hours"
+STATUS_DEADLINE_FORCE = f"{PREFIX}/status/deadline_force_active"
+STATUS_DEADLINE_REASON = f"{PREFIX}/status/deadline_reason"
+# Retained VEN SOC accrual so rebuild/restart does not forget charge progress
+STATUS_SOC_TRACKING = f"{PREFIX}/status/soc_tracking"
 
 # OpenEVSE command / telemetry (lab fixture or real broker bridge)
 OPENEVSE_CURRENT_LIMIT = "openevse/cmd/current_limit"  # integer amps; 0 = stop

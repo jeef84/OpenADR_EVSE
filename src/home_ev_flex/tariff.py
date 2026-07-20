@@ -9,6 +9,8 @@ from zoneinfo import ZoneInfo
 
 import yaml
 
+from home_ev_flex.deadline import ReadyByConfig, parse_ready_by_hhmm
+
 
 @dataclass(frozen=True)
 class TariffLimits:
@@ -65,6 +67,7 @@ class TariffConfig:
     export_credit_per_kwh: float
     limits: TariffLimits
     carbon_price: CarbonPriceConfig = field(default_factory=CarbonPriceConfig)
+    ready_by: ReadyByConfig = field(default_factory=ReadyByConfig)
 
 
 def _parse_hhmm(value: str) -> time:
@@ -115,6 +118,20 @@ def _load_carbon_price(raw: dict) -> CarbonPriceConfig:
     )
 
 
+def _load_ready_by(raw: dict) -> ReadyByConfig:
+    section = raw.get("ready_by") or {}
+    if not section:
+        return ReadyByConfig()
+    return ReadyByConfig(
+        cushion_hours=float(section.get("cushion_hours", 0.25)),
+        assumed_soc_pct=float(section.get("assumed_soc_pct", 40.0)),
+        battery_capacity_kwh=float(section.get("battery_capacity_kwh", 74.7)),
+        target_soc_pct=float(section.get("target_soc_pct", 85.0)),
+        ready_by_time=parse_ready_by_hhmm(str(section.get("ready_by_time", "07:00"))),
+        enabled_default=bool(section.get("enabled", True)),
+    )
+
+
 def load_tariff_config(path: str | Path) -> TariffConfig:
     raw = yaml.safe_load(Path(path).read_text(encoding="utf-8"))
     weekday = raw["import_rates"]["weekday"]
@@ -139,6 +156,7 @@ def load_tariff_config(path: str | Path) -> TariffConfig:
             default_voltage_v=float(limits.get("default_voltage_v", 240.0)),
         ),
         carbon_price=_load_carbon_price(raw),
+        ready_by=_load_ready_by(raw),
     )
 
 

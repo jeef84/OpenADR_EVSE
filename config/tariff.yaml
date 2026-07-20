@@ -51,3 +51,13 @@ limits:
   # ~2.5 A holds through ~0.6 kW CT/MQTT chatter at 240 V (was 0.75).
   amp_hysteresis_amps: 2.5
   default_voltage_v: 240.0
+
+# Deadline overlay sticky defaults (HA helpers may override over MQTT).
+# Missing/zero parked SOC uses assumed_soc_pct so carbon/price cannot leave the car unready.
+ready_by:
+  enabled: true
+  cushion_hours: 0.25
+  assumed_soc_pct: 40
+  battery_capacity_kwh: 74.7
+  target_soc_pct: 85
+  ready_by_time: "07:00"

@@ -26,6 +26,7 @@ cp config/examples/dte.yaml config/tariff.yaml
 | `import_rates.weekend.all_day` | `$/kWh` Sat/Sun |
 | `export.credit_per_kwh` | Opportunity cost of consuming otherwise-exported solar |
 | `carbon_price` | Optional: inflate grid import $/kWh from Electricity Maps |
+| `ready_by.*` | Deadline overlay sticky defaults (battery, target SOC, daily clock) |
 | `limits.*` | Site / EVSE hard limits and amp hysteresis |
 
 Include variable per-kWh surcharges in the fully loaded import prices. Exclude fixed monthly charges.
@@ -54,6 +55,21 @@ either dirty CO2 or dirty fossil can block grid import. Solar blocks are unchang
 Example with a MISO-like baseline (580 g / 80%): at 580/80 adder is **$0** (TOU vs bid
 decides). At 592 g (above) adder is **$0.50**, so off-peak $0.14 becomes $0.64 and fails
 a $0.16 bid.
+
+### Ready-by-departure defaults
+
+Sticky site settings (HA helpers may override over MQTT). Missing/zero parked SOC uses
+`assumed_soc_pct` so the overlay can still force-charge before departure:
+
+```yaml
+ready_by:
+  enabled: true
+  cushion_hours: 0.25
+  assumed_soc_pct: 40
+  battery_capacity_kwh: 74.7
+  target_soc_pct: 85
+  ready_by_time: "07:00"
+```
 
 ## Examples
 
