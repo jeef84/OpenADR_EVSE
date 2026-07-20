@@ -2,7 +2,7 @@
 
 Turns editable utility tariff config plus Home Assistant MQTT telemetry into OpenEVSE integer amp limits via a marginal-cost supply curve, OpenLEADR VTN (OpenADR 3.1), and a Python VEN adapter.
 
-**Milestone 1 modes:** `economic`, `solar_only`, `charge_now`, `stopped`. No forecasting, SOC, or ready-by-departure yet.
+**Milestone 1 modes:** `economic`, `solar_only`, `charge_now`, `stopped`, plus a ready-by-departure overlay (SOC + daily ready-by clock).
 
 ## Table of contents
 
@@ -58,7 +58,7 @@ For each incremental watt of EV charging:
 | Consuming otherwise-exported solar | Export credit / net-metering credit from config |
 | Importing from the utility | Current TOU import rate (+ optional carbon adder) |
 
-**Worked lab example** (`worked_stack` fixtures):
+**Example** (`worked_stack` fixtures):
 
 | Input | Value |
 | --- | ---: |
@@ -68,7 +68,7 @@ For each incremental watt of EV charging:
 | Bid | $0.16/kWh |
 | Voltage | 240 V |
 
-Only the first 3 kW block clears the bid → accepted **3 kW** → **12 A** at 240 V.
+3 kW block clears the bid → accepted **3 kW** → **12 A** at 240 V.
 
 ---
 
@@ -148,16 +148,16 @@ mqtt-fixtures --host localhost --scenario below_imin --once
 | `charge_now` | User amp limit (24 A); ignores price |
 | `stopped` | Always 0 A |
 | `below_imin` | Surplus maps below 6 A → stop |
+| `deadline_force` | Dirty grid + overdue ready-by → force charge despite carbon |
 
 ---
 
 ## 3. Real OpenEVSE on the same broker
 
 1. Point the OpenEVSE WiFi gateway at the compose Mosquitto host (or point compose Mosquitto at your existing broker).
-2. Set `OPENEVSE_MQTT_BASE` in `compose/.env` to the gateway base topic.
-3. Leave OpenEVSE UI on **Auto**. Confirm bridge logs show `claim/set` (or `override/set`) when the VEN commands amps; stop should log dual disable (not a bare Auto yield).
-4. Keep gateway divert on **Normal / Fast**, not Eco (Eco can reclaim at priority 1100 and leave SETPOINT ~6 A).
-5. Keep `mqtt-fixtures` running only for lab demos. For live HA telemetry:
+2. Set `OPENEVSE_MQTT_BASE` in `compose/.env` to the gateway base topic (usually openevse).
+3. Leave OpenEVSE UI on **Auto** (Robot button). Confirm bridge logs show `claim/set` (or `override/set`) when the VEN commands amps; stop should log dual disable (not a bare Auto yield).
+4. Keep `mqtt-fixtures` running only for lab demos. For live HA telemetry:
 
 ```bash
 cd compose
@@ -170,7 +170,7 @@ docker compose stop mqtt-fixtures
 
 1. Ensure HA can publish/subscribe to the same Mosquitto instance (MQTT integration).
 2. Copy `ha/packages/home_ev_flex.yaml` into your HA `packages/` directory (enable packages in `configuration.yaml` if needed).
-3. **Edit SITE CONFIG** in that file before reload:
+3. **Edit SITE CONFIG** in the file, before reload/restarting:
    - Replace every `sensor.YOUR_SOLAR_PRODUCTION_KW` with your solar production entity (**kW**).
    - Point `sensor.grid_import_power` / `sensor.grid_export_power` at your grid CT sensors (**watts** in the shipped templates; drop `/ 1000` if yours are already kW).
 4. Reload automations / restart HA so helpers and template sensors appear.
@@ -184,9 +184,14 @@ Full topic contract: [ha/mqtt_contract.md](ha/mqtt_contract.md).
 | Helper | Purpose |
 | --- | --- |
 | `input_boolean.home_ev_flex_enabled` | Master enable |
+| `input_boolean.home_ev_flex_ready_by_enabled` | Deadline overlay (default on) |
 | `input_number.home_ev_flex_bid_price` | Max $/kWh willing to pay |
-| `input_number.home_ev_flex_user_amp_limit` | Charge Now amp setpoint (6-48) |
+| `input_number.home_ev_flex_user_amp_limit` | Charge Now / deadline force amp setpoint (6-48) |
 | `input_number.home_ev_flex_voltage_v` | Nominal voltage for kW↔A |
+| `input_number.home_ev_flex_parked_soc` | Per plug-in SOC % (0 → VEN assumes 40%; re-plug adjusts by absence) |
+| `input_number.home_ev_flex_target_soc` | Sticky target % (default 85) |
+| `input_number.home_ev_flex_battery_capacity_kwh` | Sticky pack kWh (default 74.7) |
+| `input_datetime.home_ev_flex_ready_by_time` | Sticky daily ready-by (default 07:00) |
 | `input_select.home_ev_flex_mode` | `economic` / `solar_only` / `charge_now` / `stopped` |
 
 ---
@@ -199,6 +204,8 @@ Full topic contract: [ha/mqtt_contract.md](ha/mqtt_contract.md).
 | `solar_only` | Excess solar only (`export - import + EV`, EMA-smoothed); ignores cheap grid import and IMPORT_POWER_LIMIT |
 | `charge_now` | User amp limit; ignores price |
 | `stopped` | Always 0 A |
+
+**Ready-by overlay** (on `economic` / `solar_only`): when energy needed cannot finish by the daily ready-by clock, VEN force-charges at the user amp limit (ignores price/carbon). Sticky defaults: 74.7 kWh, 85% target, 07:00. Missing SOC assumes 40%. Once effective SOC reaches the sticky target, automatic modes stop (`charge_now` still bypasses).
 
 VEN never commands 1-5 A: anything below `i_min_amps` (default 6) becomes a stop.
 
@@ -225,6 +232,7 @@ cp config/examples/dte.yaml config/tariff.yaml
 | `import_rates.weekend.all_day` | $/kWh Sat/Sun |
 | `export.credit_per_kwh` | Opportunity cost of consuming otherwise-exported solar |
 | `carbon_price` | Optional: inflate grid import $/kWh from Electricity Maps |
+| `ready_by.*` | Deadline overlay sticky defaults (battery, target SOC, daily clock) |
 | `limits.*` | Site / EVSE hard limits and amp hysteresis |
 
 Include variable per-kWh surcharges in fully loaded import prices. Exclude fixed monthly charges.
@@ -274,10 +282,15 @@ Prefix: `home_ev_flex/`.
 | `telemetry/voltage_v` | HA → VEN | Nominal volts |
 | `telemetry/co2_intensity_g_per_kwh` | HA → engine | Optional carbon signal |
 | `telemetry/fossil_fuel_pct` | HA → engine | Optional carbon signal |
+| `telemetry/soc_pct` | HA → VEN | Per-session SOC % (manual or future OEM) |
 | `control/mode` | HA → VEN | Mode string |
 | `control/bid_price_per_kwh` | HA → engine/VEN | Bid |
-| `control/user_amp_limit` | HA → VEN | Charge Now amps |
-| `status/*` | services → HA | Target amps, accepted kW, prices, mode |
+| `control/user_amp_limit` | HA → VEN | Charge Now / deadline force amps |
+| `control/target_soc_pct` | HA → VEN | Sticky target % |
+| `control/battery_capacity_kwh` | HA → VEN | Sticky pack kWh |
+| `control/ready_by_time` | HA → VEN | Sticky daily `HH:MM` |
+| `control/ready_by_enabled` | HA → VEN | Deadline overlay master |
+| `status/*` | services → HA | Target amps, accepted kW, prices, mode, deadline |
 | `openevse/cmd/current_limit` | VEN → bridge | Integer amps (`0` = stop; `1-5` must stop) |
 | `openevse/status/*` | bridge → HA/VEN | Power, energy, applied limit, connected |
 
@@ -415,6 +428,7 @@ Core library modules (`src/home_ev_flex/`):
 | `tariff.py` | YAML load, TOU resolve, carbon adder, surplus helpers |
 | `supply_curve.py` | Marginal blocks + bid dispatch |
 | `amperage.py` | Floor quantization, hysteresis, 1-5 A ban |
+| `deadline.py` | Ready-by slack, assumed SOC, force decision |
 | `smoothing.py` | EMA filter for surplus |
 | `openadr.py` | Program `HOME_EV_FLEX`, event upsert/read |
 | `mqtt_topics.py` | Shared topic constants |
@@ -429,11 +443,12 @@ Core library modules (`src/home_ev_flex/`):
 | [docs/tariff-config.md](docs/tariff-config.md) | Full tariff schema, carbon overlay, future price sources |
 | [ha/mqtt_contract.md](ha/mqtt_contract.md) | HA helpers, topics, bridge mapping, divert notes |
 | [mdlib/milestone1-plan.md](mdlib/milestone1-plan.md) | Milestone 1 design invariants and future work |
+| [mdlib/ready-by-departure-plan.md](mdlib/ready-by-departure-plan.md) | Deadline overlay design record |
 
 ---
 
 ## Scope and non-goals
 
-**In scope (Milestone 1):** local OpenADR 3.1 loop, static YAML tariffs, four charge modes, lab fixtures, real OpenEVSE MQTT control, optional carbon overlay on grid import.
+**In scope (Milestone 1+):** local OpenADR 3.1 loop, static YAML tariffs, four charge modes, ready-by-departure overlay (manual/OEM SOC topic, sticky defaults), lab fixtures, real OpenEVSE MQTT control, optional carbon overlay on grid import.
 
-**Not yet:** forecasting, vehicle SOC, ready-by-departure bidding, live utility OpenADR feeds, realtime published residential prices (`price_source` plugins), multi-EVSE coordination.
+**Not yet:** forecasting, OEM API wiring, weekday/weekend target schedules, ready-by bid ramping on the VTN, live utility OpenADR feeds, realtime published residential prices (`price_source` plugins), multi-EVSE coordination.

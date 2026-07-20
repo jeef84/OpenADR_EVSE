@@ -29,12 +29,25 @@
 # Modes: economic | solar_only | charge_now | stopped
 #   solar_only -> measured excess solar only (no grid import even if TOU is cheap)
 #   stopped -> VEN commands 0 A regardless of price / bid / stale events
+#
+# Ready-by-departure overlay (economic / solar_only):
+#   Sticky defaults: battery kWh, target SOC, daily ready-by clock (not per plug-in).
+#   Per plug-in: parked SOC (or later bind telemetry/soc_pct to an OEM entity).
+#   Missing SOC → VEN assumes 40% so carbon/price cannot leave the car unready.
+#   On re-plug after absence (OpenEVSE connected):
+#     ≤30 min keep previous; 30–45 −5 kWh; 45–60 −10 kWh; >60 min → 40%.
+#     (15–30 treated as keep; subtract tiers start at 30.)
 
 input_boolean:
   home_ev_flex_enabled:
     name: "HOME EV FLEX Enabled"
     icon: mdi:transmission-tower-export
     initial: false
+
+  home_ev_flex_ready_by_enabled:
+    name: "HOME EV FLEX Ready-by Enabled"
+    icon: mdi:clock-check-outline
+    initial: true
 
 input_number:
   home_ev_flex_bid_price:
@@ -66,6 +79,53 @@ input_number:
     unit_of_measurement: "V"
     icon: mdi:flash
     initial: 240
+
+  # Per plug-in: set when you park, or leave 0 for VEN assumed SOC (40%).
+  # Later: publish an OEM SOC sensor to home_ev_flex/telemetry/soc_pct instead.
+  home_ev_flex_parked_soc:
+    name: "HOME EV FLEX Parked SOC (%)"
+    min: 0
+    max: 100
+    step: 1
+    mode: slider
+    unit_of_measurement: "%"
+    icon: mdi:battery
+    initial: 0
+
+  # Sticky site defaults (change when the vehicle or routine changes).
+  home_ev_flex_target_soc:
+    name: "HOME EV FLEX Target SOC (%)"
+    min: 10
+    max: 100
+    step: 1
+    mode: box
+    unit_of_measurement: "%"
+    icon: mdi:battery-charging-80
+    initial: 85
+
+  home_ev_flex_battery_capacity_kwh:
+    name: "HOME EV FLEX Battery Capacity"
+    min: 10
+    max: 200
+    step: 0.1
+    mode: box
+    unit_of_measurement: "kWh"
+    icon: mdi:car-battery
+    initial: 74.7
+
+input_datetime:
+  home_ev_flex_ready_by_time:
+    name: "HOME EV FLEX Ready-by Time"
+    has_date: false
+    has_time: true
+    icon: mdi:clock-outline
+    initial: "07:00:00"
+
+  home_ev_flex_unplugged_time:
+    name: "HOME EV FLEX Unplugged Time"
+    has_date: true
+    has_time: true
+    icon: mdi:ev-station
 
 input_select:
   home_ev_flex_mode:
@@ -111,10 +171,6 @@ mqtt:
       device_class: energy
       state_class: total_increasing
       value_template: "{{ value | float(0) }}"
-
-    - name: "HOME EV FLEX OpenEVSE Connected"
-      unique_id: home_ev_flex_openevse_connected
-      state_topic: "openevse/status/connected"
 
     - name: "HOME EV FLEX Target Amps"
       unique_id: home_ev_flex_target_amps
@@ -168,6 +224,44 @@ mqtt:
       unit_of_measurement: "$/kWh"
       state_class: measurement
       value_template: "{{ value | float(0) }}"
+
+    - name: "HOME EV FLEX Effective SOC"
+      unique_id: home_ev_flex_effective_soc
+      state_topic: "home_ev_flex/status/effective_soc_pct"
+      unit_of_measurement: "%"
+      state_class: measurement
+      value_template: "{{ value | float(0) }}"
+
+    - name: "HOME EV FLEX Energy Needed"
+      unique_id: home_ev_flex_energy_needed_kwh
+      state_topic: "home_ev_flex/status/energy_needed_kwh"
+      unit_of_measurement: "kWh"
+      device_class: energy
+      state_class: measurement
+      value_template: "{{ value | float(0) }}"
+
+    - name: "HOME EV FLEX Slack Hours"
+      unique_id: home_ev_flex_slack_hours
+      state_topic: "home_ev_flex/status/slack_hours"
+      unit_of_measurement: "h"
+      state_class: measurement
+      value_template: "{{ value | float(0) }}"
+
+    - name: "HOME EV FLEX Deadline Force Active"
+      unique_id: home_ev_flex_deadline_force_active
+      state_topic: "home_ev_flex/status/deadline_force_active"
+
+    - name: "HOME EV FLEX Deadline Reason"
+      unique_id: home_ev_flex_deadline_reason
+      state_topic: "home_ev_flex/status/deadline_reason"
+
+  binary_sensor:
+    - name: "HOME EV FLEX OpenEVSE Connected"
+      unique_id: home_ev_flex_openevse_connected
+      state_topic: "openevse/status/connected"
+      payload_on: "true"
+      payload_off: "false"
+      device_class: plug
 
 template:
   - sensor:
@@ -264,6 +358,7 @@ automation:
           - sensor.home_ev_flex_voltage_v
           - sensor.home_ev_flex_co2_intensity
           - sensor.home_ev_flex_fossil_fuel_pct
+          - input_number.home_ev_flex_parked_soc
       - platform: time_pattern
         seconds: "/15"
     condition:
@@ -359,6 +454,13 @@ automation:
                   topic: home_ev_flex/telemetry/fossil_fuel_pct
                   payload: "{{ states('sensor.home_ev_flex_fossil_fuel_pct') }}"
                   retain: true
+      # Parked SOC (or later OEM): republish with telemetry so VEN cannot miss a
+      # one-shot control publish after reconnect / package reload.
+      - service: mqtt.publish
+        data:
+          topic: home_ev_flex/telemetry/soc_pct
+          payload: "{{ states('input_number.home_ev_flex_parked_soc') | float(0) }}"
+          retain: true
 
   - id: home_ev_flex_publish_controls
     alias: "HOME EV FLEX: Publish controls to MQTT"
@@ -370,6 +472,11 @@ automation:
           - input_number.home_ev_flex_user_amp_limit
           - input_select.home_ev_flex_mode
           - input_boolean.home_ev_flex_enabled
+          - input_number.home_ev_flex_parked_soc
+          - input_number.home_ev_flex_target_soc
+          - input_number.home_ev_flex_battery_capacity_kwh
+          - input_datetime.home_ev_flex_ready_by_time
+          - input_boolean.home_ev_flex_ready_by_enabled
       - platform: homeassistant
         event: start
     condition:
@@ -392,3 +499,110 @@ automation:
           topic: home_ev_flex/control/mode
           payload: "{{ states('input_select.home_ev_flex_mode') }}"
           retain: true
+      - service: mqtt.publish
+        data:
+          topic: home_ev_flex/telemetry/soc_pct
+          payload: "{{ states('input_number.home_ev_flex_parked_soc') | float(0) }}"
+          retain: true
+      - service: mqtt.publish
+        data:
+          topic: home_ev_flex/control/target_soc_pct
+          payload: "{{ states('input_number.home_ev_flex_target_soc') | float(85) }}"
+          retain: true
+      - service: mqtt.publish
+        data:
+          topic: home_ev_flex/control/battery_capacity_kwh
+          payload: "{{ states('input_number.home_ev_flex_battery_capacity_kwh') | float(74.7) }}"
+          retain: true
+      - service: mqtt.publish
+        data:
+          topic: home_ev_flex/control/ready_by_time
+          payload: "{{ states('input_datetime.home_ev_flex_ready_by_time')[0:5] }}"
+          retain: true
+      - service: mqtt.publish
+        data:
+          topic: home_ev_flex/control/ready_by_enabled
+          payload: "{{ 'true' if is_state('input_boolean.home_ev_flex_ready_by_enabled', 'on') else 'false' }}"
+          retain: true
+
+  # Record when the vehicle unplugs so re-plug can adjust parked SOC by absence.
+  - id: home_ev_flex_record_unplug_time
+    alias: "HOME EV FLEX: Record unplug time"
+    mode: single
+    trigger:
+      - platform: state
+        entity_id: binary_sensor.home_ev_flex_openevse_connected
+        from: "on"
+        to: "off"
+    action:
+      - service: input_datetime.set_datetime
+        target:
+          entity_id: input_datetime.home_ev_flex_unplugged_time
+        data:
+          datetime: "{{ now().strftime('%Y-%m-%d %H:%M:%S') }}"
+
+  # On re-plug: adjust parked SOC from absence length.
+  # ≤30 min keep; 30–45 −5 kWh; 45–60 −10 kWh; >60 min → 40%.
+  # (15–30 filled as keep; subtract tiers start at 30.)
+  - id: home_ev_flex_adjust_soc_on_plugin
+    alias: "HOME EV FLEX: Adjust parked SOC on plug-in"
+    mode: single
+    trigger:
+      - platform: state
+        entity_id: binary_sensor.home_ev_flex_openevse_connected
+        from: "off"
+        to: "on"
+    variables:
+      unplug_time_str: "{{ states('input_datetime.home_ev_flex_unplugged_time') }}"
+      minutes_gone: >
+        {% if unplug_time_str in ['unknown', 'unavailable', ''] %}
+          0
+        {% else %}
+          {{ ((as_timestamp(now()) - as_timestamp(unplug_time_str)) / 60) | float(0) }}
+        {% endif %}
+      battery_kwh: "{{ states('input_number.home_ev_flex_battery_capacity_kwh') | float(74.7) }}"
+      prev_soc: "{{ states('input_number.home_ev_flex_parked_soc') | float(0) }}"
+      base_soc: "{{ prev_soc if prev_soc | float(0) > 0 else 40 }}"
+      new_soc: >
+        {% set m = minutes_gone | float(0) %}
+        {% set bat = battery_kwh | float(74.7) %}
+        {% set base = base_soc | float(40) %}
+        {% if m <= 30 %}
+          {{ states('input_number.home_ev_flex_parked_soc') | float(0) }}
+        {% elif m <= 45 %}
+          {{ [0, base - (5.0 / bat) * 100] | max | round(1) }}
+        {% elif m <= 60 %}
+          {{ [0, base - (10.0 / bat) * 100] | max | round(1) }}
+        {% else %}
+          40
+        {% endif %}
+      reason: >
+        {% set m = minutes_gone | float(0) %}
+        {% if m <= 30 %}
+          keep (gone {{ m | round(0) }} min)
+        {% elif m <= 45 %}
+          -5 kWh after {{ m | round(0) }} min
+        {% elif m <= 60 %}
+          -10 kWh after {{ m | round(0) }} min
+        {% else %}
+          reset to 40% after {{ m | round(0) }} min
+        {% endif %}
+    action:
+      - choose:
+          - conditions:
+              - condition: template
+                value_template: "{{ (minutes_gone | float(0)) > 30 }}"
+            sequence:
+              - service: input_number.set_value
+                target:
+                  entity_id: input_number.home_ev_flex_parked_soc
+                data:
+                  value: "{{ new_soc | float(0) }}"
+              - service: persistent_notification.create
+                data:
+                  notification_id: home_ev_flex_soc_adjust
+                  title: "HOME EV FLEX parked SOC"
+                  message: >
+                    Absence {{ minutes_gone | float(0) | round(0) }} min: {{ reason }}.
+                    Parked SOC set to {{ new_soc }}%.
+                    Update the slider if you know the real SOC.
