@@ -25,9 +25,35 @@ cp config/examples/dte.yaml config/tariff.yaml
 | `import_rates.weekday.off_peak` | `$/kWh` outside on-peak on weekdays |
 | `import_rates.weekend.all_day` | `$/kWh` Sat/Sun |
 | `export.credit_per_kwh` | Opportunity cost of consuming otherwise-exported solar |
+| `carbon_price` | Optional: inflate grid import $/kWh from Electricity Maps |
 | `limits.*` | Site / EVSE hard limits and amp hysteresis |
 
 Include variable per-kWh surcharges in the fully loaded import prices. Exclude fixed monthly charges.
+
+### Carbon price overlay
+
+Optional. When enabled, HA publishes Electricity Maps sensors and the tariff engine
+raises the **grid import** block price (solar blocks stay at export credit):
+
+```yaml
+carbon_price:
+  enabled: true
+  unavailable_behavior: max_adder  # or zero
+  co2_intensity:
+    threshold_g_per_kwh: 580       # permit at or below (site-specific "good")
+    max_adder_per_kwh: 0.50        # full adder when above threshold
+  fossil_fuel_pct:
+    threshold_pct: 80
+    max_adder_per_kwh: 0.50
+```
+
+Each signal is a **hard gate**: `value <= threshold` → adder $0; `value > threshold` →
+`max_adder_per_kwh`. Final carbon adder is the **max** of available signal adders, so
+either dirty CO2 or dirty fossil can block grid import. Solar blocks are unchanged.
+
+Example with a MISO-like baseline (580 g / 80%): at 580/80 adder is **$0** (TOU vs bid
+decides). At 592 g (above) adder is **$0.50**, so off-peak $0.14 becomes $0.64 and fails
+a $0.16 bid.
 
 ## Examples
 

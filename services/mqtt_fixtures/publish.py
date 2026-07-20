@@ -15,6 +15,12 @@ from home_ev_flex import mqtt_topics as topics
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 logger = logging.getLogger("mqtt_fixtures")
 
+# Clean-grid defaults so lab fixtures are not fail-closed when carbon_price.enabled.
+_CLEAN_CARBON = {
+    topics.CO2_INTENSITY: "120.0",
+    topics.FOSSIL_FUEL_PCT: "25.0",
+}
+
 SCENARIOS = {
     "worked_stack": {
         topics.SOLAR_KW: "5.0",
@@ -25,6 +31,7 @@ SCENARIOS = {
         topics.MODE: "economic",
         topics.BID_PRICE: "0.16",
         topics.USER_AMP_LIMIT: "32",
+        **_CLEAN_CARBON,
     },
     "solar_only": {
         # Weekend-like: surplus 2 kW with HVAC load; economic would also accept
@@ -37,6 +44,7 @@ SCENARIOS = {
         topics.MODE: "solar_only",
         topics.BID_PRICE: "0.50",
         topics.USER_AMP_LIMIT: "32",
+        **_CLEAN_CARBON,
     },
     "charge_now": {
         topics.SOLAR_KW: "0.0",
@@ -47,6 +55,7 @@ SCENARIOS = {
         topics.MODE: "charge_now",
         topics.BID_PRICE: "0.05",
         topics.USER_AMP_LIMIT: "24",
+        **_CLEAN_CARBON,
     },
     "stopped": {
         topics.SOLAR_KW: "5.0",
@@ -57,6 +66,7 @@ SCENARIOS = {
         topics.MODE: "stopped",
         topics.BID_PRICE: "0.50",
         topics.USER_AMP_LIMIT: "32",
+        **_CLEAN_CARBON,
     },
     "below_imin": {
         topics.SOLAR_KW: "2.0",
@@ -67,6 +77,7 @@ SCENARIOS = {
         topics.MODE: "economic",
         topics.BID_PRICE: "0.16",
         topics.USER_AMP_LIMIT: "32",
+        **_CLEAN_CARBON,
     },
 }
 

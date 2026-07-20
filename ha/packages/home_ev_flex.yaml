@@ -20,6 +20,10 @@
 #   sensor.YOUR_SOLAR_PRODUCTION_KW
 #   sensor.grid_import_power
 #   sensor.grid_export_power
+#
+# Carbon (optional; used when config/tariff.yaml carbon_price.enabled):
+#   sensor.electricity_maps_co2_intensity          (gCO2eq/kWh)
+#   sensor.electricity_maps_grid_fossil_fuel_percentage  (%)
 # ---------------------------------------------------------------------------
 #
 # Modes: economic | solar_only | charge_now | stopped
@@ -151,6 +155,20 @@ mqtt:
       unique_id: home_ev_flex_event_accepted
       state_topic: "home_ev_flex/status/event_accepted"
 
+    - name: "HOME EV FLEX Carbon Adder"
+      unique_id: home_ev_flex_carbon_adder
+      state_topic: "home_ev_flex/status/carbon_adder_per_kwh"
+      unit_of_measurement: "$/kWh"
+      state_class: measurement
+      value_template: "{{ value | float(0) }}"
+
+    - name: "HOME EV FLEX Effective Import Price"
+      unique_id: home_ev_flex_effective_import_price
+      state_topic: "home_ev_flex/status/effective_import_price_per_kwh"
+      unit_of_measurement: "$/kWh"
+      state_class: measurement
+      value_template: "{{ value | float(0) }}"
+
 template:
   - sensor:
       - name: "HOME EV FLEX Solar kW"
@@ -211,6 +229,26 @@ template:
         state: >
           {{ states('input_number.home_ev_flex_voltage_v') | float(240) | round(0) }}
 
+      - name: "HOME EV FLEX CO2 Intensity"
+        unique_id: home_ev_flex_co2_intensity
+        unit_of_measurement: "gCO2eq/kWh"
+        state_class: measurement
+        availability: >
+          {{ states('sensor.electricity_maps_co2_intensity')
+             not in ['unavailable', 'unknown', 'none'] }}
+        state: >
+          {{ states('sensor.electricity_maps_co2_intensity') | float(0) | round(1) }}
+
+      - name: "HOME EV FLEX Fossil Fuel Pct"
+        unique_id: home_ev_flex_fossil_fuel_pct
+        unit_of_measurement: "%"
+        state_class: measurement
+        availability: >
+          {{ states('sensor.electricity_maps_grid_fossil_fuel_percentage')
+             not in ['unavailable', 'unknown', 'none'] }}
+        state: >
+          {{ states('sensor.electricity_maps_grid_fossil_fuel_percentage') | float(0) | round(2) }}
+
 automation:
   - id: home_ev_flex_publish_telemetry
     alias: "HOME EV FLEX: Publish telemetry to MQTT"
@@ -224,6 +262,8 @@ automation:
           - sensor.home_ev_flex_grid_import_kw
           - sensor.home_ev_flex_grid_export_kw
           - sensor.home_ev_flex_voltage_v
+          - sensor.home_ev_flex_co2_intensity
+          - sensor.home_ev_flex_fossil_fuel_pct
       - platform: time_pattern
         seconds: "/15"
     condition:
@@ -231,31 +271,94 @@ automation:
         entity_id: input_boolean.home_ev_flex_enabled
         state: "on"
     action:
-      - service: mqtt.publish
-        data:
-          topic: home_ev_flex/telemetry/solar_kw
-          payload: "{{ states('sensor.home_ev_flex_solar_kw') }}"
-          retain: true
-      - service: mqtt.publish
-        data:
-          topic: home_ev_flex/telemetry/house_load_kw
-          payload: "{{ states('sensor.home_ev_flex_house_load_kw') }}"
-          retain: true
-      - service: mqtt.publish
-        data:
-          topic: home_ev_flex/telemetry/grid_import_kw
-          payload: "{{ states('sensor.home_ev_flex_grid_import_kw') }}"
-          retain: true
-      - service: mqtt.publish
-        data:
-          topic: home_ev_flex/telemetry/grid_export_kw
-          payload: "{{ states('sensor.home_ev_flex_grid_export_kw') }}"
-          retain: true
-      - service: mqtt.publish
-        data:
-          topic: home_ev_flex/telemetry/voltage_v
-          payload: "{{ states('sensor.home_ev_flex_voltage_v') }}"
-          retain: true
+      # Skip unavailable entities so MQTT never carries HA's literal "unavailable"
+      # string (that used to crash tariff-engine's float() parser).
+      - choose:
+          - conditions:
+              - condition: template
+                value_template: >
+                  {{ states('sensor.home_ev_flex_solar_kw')
+                     not in ['unavailable', 'unknown', 'none'] }}
+            sequence:
+              - service: mqtt.publish
+                data:
+                  topic: home_ev_flex/telemetry/solar_kw
+                  payload: "{{ states('sensor.home_ev_flex_solar_kw') }}"
+                  retain: true
+      - choose:
+          - conditions:
+              - condition: template
+                value_template: >
+                  {{ states('sensor.home_ev_flex_house_load_kw')
+                     not in ['unavailable', 'unknown', 'none'] }}
+            sequence:
+              - service: mqtt.publish
+                data:
+                  topic: home_ev_flex/telemetry/house_load_kw
+                  payload: "{{ states('sensor.home_ev_flex_house_load_kw') }}"
+                  retain: true
+      - choose:
+          - conditions:
+              - condition: template
+                value_template: >
+                  {{ states('sensor.home_ev_flex_grid_import_kw')
+                     not in ['unavailable', 'unknown', 'none'] }}
+            sequence:
+              - service: mqtt.publish
+                data:
+                  topic: home_ev_flex/telemetry/grid_import_kw
+                  payload: "{{ states('sensor.home_ev_flex_grid_import_kw') }}"
+                  retain: true
+      - choose:
+          - conditions:
+              - condition: template
+                value_template: >
+                  {{ states('sensor.home_ev_flex_grid_export_kw')
+                     not in ['unavailable', 'unknown', 'none'] }}
+            sequence:
+              - service: mqtt.publish
+                data:
+                  topic: home_ev_flex/telemetry/grid_export_kw
+                  payload: "{{ states('sensor.home_ev_flex_grid_export_kw') }}"
+                  retain: true
+      - choose:
+          - conditions:
+              - condition: template
+                value_template: >
+                  {{ states('sensor.home_ev_flex_voltage_v')
+                     not in ['unavailable', 'unknown', 'none'] }}
+            sequence:
+              - service: mqtt.publish
+                data:
+                  topic: home_ev_flex/telemetry/voltage_v
+                  payload: "{{ states('sensor.home_ev_flex_voltage_v') }}"
+                  retain: true
+      # Only publish when Electricity Maps is available; keep last retained value
+      # otherwise. Engine fail-closes to max_adder if it has never seen a reading.
+      - choose:
+          - conditions:
+              - condition: template
+                value_template: >
+                  {{ states('sensor.home_ev_flex_co2_intensity')
+                     not in ['unavailable', 'unknown', 'none'] }}
+            sequence:
+              - service: mqtt.publish
+                data:
+                  topic: home_ev_flex/telemetry/co2_intensity_g_per_kwh
+                  payload: "{{ states('sensor.home_ev_flex_co2_intensity') }}"
+                  retain: true
+      - choose:
+          - conditions:
+              - condition: template
+                value_template: >
+                  {{ states('sensor.home_ev_flex_fossil_fuel_pct')
+                     not in ['unavailable', 'unknown', 'none'] }}
+            sequence:
+              - service: mqtt.publish
+                data:
+                  topic: home_ev_flex/telemetry/fossil_fuel_pct
+                  payload: "{{ states('sensor.home_ev_flex_fossil_fuel_pct') }}"
+                  retain: true
 
   - id: home_ev_flex_publish_controls
     alias: "HOME EV FLEX: Publish controls to MQTT"

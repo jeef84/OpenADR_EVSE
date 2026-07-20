@@ -95,7 +95,7 @@ Topic contract: [ha/mqtt_contract.md](ha/mqtt_contract.md).
 
 | Mode | Behavior |
 | --- | --- |
-| `economic` | Accept supply-curve blocks at or below your bid; may import when TOU is cheap enough |
+| `economic` | Accept supply-curve blocks at or below your bid; may import when TOU (+ optional carbon adder) is cheap enough |
 | `solar_only` | Excess solar only (`export − import + EV`); ignores cheap grid import |
 | `charge_now` | User amp limit; ignores price |
 | `stopped` | Always 0 A |

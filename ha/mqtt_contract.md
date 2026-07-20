@@ -78,7 +78,32 @@ Set `OPENEVSE_MQTT_BASE` in `compose/.env` to match the OpenEVSE WiFi gateway.
 | `home_ev_flex/telemetry/house_load_kw` | solar + import − export − OpenEVSE kW |
 | `home_ev_flex/telemetry/grid_*_kw` | Site grid CT / meter sensors |
 | `home_ev_flex/telemetry/voltage_v` | `input_number.home_ev_flex_voltage_v` |
+| `home_ev_flex/telemetry/co2_intensity_g_per_kwh` | Electricity Maps CO2 intensity (when available) |
+| `home_ev_flex/telemetry/fossil_fuel_pct` | Electricity Maps fossil fuel % (when available) |
 | `home_ev_flex/control/*` | helpers above |
+
+### Carbon-priced import (optional)
+
+When `carbon_price.enabled` is true in `config/tariff.yaml`, the tariff engine adds a
+$/kWh overlay to the **grid_import** supply-curve block only:
+
+`effective_import = TOU_import + max(co2_adder, fossil_adder)`
+
+Each signal is a hard permit gate: at or below threshold → adder $0; above →
+`max_adder_per_kwh`. Solar export-credit blocks are unchanged. Your bid still decides
+acceptance when the gate permits.
+
+Status topics (tariff engine → HA):
+
+| Topic | Meaning |
+| --- | --- |
+| `home_ev_flex/status/carbon_adder_per_kwh` | Active carbon overlay ($/kWh) |
+| `home_ev_flex/status/effective_import_price_per_kwh` | TOU + carbon adder |
+
+If carbon is enabled and no MQTT reading has arrived, `unavailable_behavior: max_adder`
+(default) applies the configured max adder so the stack does not silently import on a
+dirty or unknown grid. HA only publishes Electricity Maps values when the sensors are
+available (last retained value is kept).
 
 VEN derives solar-only surplus as `export − import + EV` (not a raw solar−house MQTT pair).
 

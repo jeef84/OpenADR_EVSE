@@ -2,16 +2,22 @@
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from types import SimpleNamespace
 from zoneinfo import ZoneInfo
 
 import pytest
 
 from home_ev_flex.amperage import AmpController
+from home_ev_flex.openadr import ACTIVE_EVENT_NAME, read_active_flex_signals
 from home_ev_flex.supply_curve import build_supply_curve, dispatch
 from home_ev_flex.smoothing import EmaFilter
 from home_ev_flex.tariff import (
+    CarbonPriceConfig,
+    CarbonSignalConfig,
+    carbon_adder_per_kwh,
+    effective_import_price,
     grid_net_surplus_kw,
     load_tariff_config,
     resolve_import_price,
@@ -184,4 +190,167 @@ def test_surplus_ema_rejects_single_sample_spike():
     # Spike like the stale solar/house pair (~5.1 kW) only moves EMA modestly.
     assert ema.update(5.1) == pytest.approx(0.2 * 5.1 + 0.8 * 1.8)
     assert ema.value < 3.0
+
+
+def test_carbon_adder_disabled_is_zero():
+    """Why: sites without Electricity Maps must keep pure TOU economics."""
+    adder, reason = carbon_adder_per_kwh(
+        CarbonPriceConfig(enabled=False),
+        co2_intensity_g_per_kwh=573.0,
+        fossil_fuel_pct=77.87,
+    )
+    assert adder == pytest.approx(0.0)
+    assert reason == "disabled"
+
+
+def test_carbon_adder_uses_max_of_dirty_signals():
+    """
+    Why: above the permit gate, carbon must fully block typical bids.
+
+    Either CO2 or fossil above threshold applies max_adder ($0.50).
+    """
+    cfg = load_tariff_config(TARIFF_PATH)
+    assert cfg.carbon_price.enabled
+    assert cfg.carbon_price.co2_intensity.threshold == pytest.approx(580.0)
+    assert cfg.carbon_price.fossil_fuel_pct.threshold == pytest.approx(80.0)
+    adder, reason = carbon_adder_per_kwh(
+        cfg.carbon_price,
+        co2_intensity_g_per_kwh=592.0,  # above 580
+        fossil_fuel_pct=78.0,  # at/below 80
+    )
+    assert adder == pytest.approx(0.50)
+    assert reason == "signal"
+
+
+def test_local_good_baseline_has_zero_carbon_adder():
+    """Why: at or below 580 g / 80% fossil must permit (adder $0; TOU vs bid)."""
+    cfg = load_tariff_config(TARIFF_PATH)
+    adder, reason = carbon_adder_per_kwh(
+        cfg.carbon_price,
+        co2_intensity_g_per_kwh=580.0,
+        fossil_fuel_pct=80.0,
+    )
+    assert adder == pytest.approx(0.0)
+    assert reason == "signal"
+
+
+def test_dirty_grid_blocks_off_peak_import_at_default_bid():
+    """
+    Why: economic mode must not import when CO2 is above the permit gate.
+
+    Off-peak $0.14 + $0.50 carbon > bid $0.16 → accept solar only.
+    """
+    cfg = load_tariff_config(TARIFF_PATH)
+    tz = ZoneInfo(cfg.timezone)
+    off_peak = datetime(2026, 7, 15, 20, 0, tzinfo=tz)
+    import_eff, adder, _ = effective_import_price(
+        cfg,
+        off_peak,
+        co2_intensity_g_per_kwh=592.0,
+        fossil_fuel_pct=78.0,
+    )
+    assert adder == pytest.approx(0.50)
+    assert import_eff > 0.16
+
+    curve = build_supply_curve(
+        solar_surplus_kw=3.0,
+        export_credit_per_kwh=cfg.export_credit_per_kwh,
+        import_price_per_kwh=import_eff,
+        panel_service_headroom_kw=cfg.limits.panel_service_headroom_kw,
+    )
+    result = dispatch(
+        curve,
+        bid_price_per_kwh=0.16,
+        evse_maximum_kw=7.7,
+        vehicle_maximum_kw=7.7,
+        panel_service_headroom_kw=7.7,
+        user_charging_limit_kw=7.7,
+    )
+    assert result.import_power_limit_kw == pytest.approx(0.0)
+    assert result.accepted_power_kw == pytest.approx(3.0)
+
+
+def test_clean_grid_allows_off_peak_import_at_high_bid():
+    """Why: carbon overlay must not permanently ban cheap clean import."""
+    cfg = load_tariff_config(TARIFF_PATH)
+    tz = ZoneInfo(cfg.timezone)
+    off_peak = datetime(2026, 7, 15, 20, 0, tzinfo=tz)
+    import_eff, adder, _ = effective_import_price(
+        cfg,
+        off_peak,
+        co2_intensity_g_per_kwh=120.0,
+        fossil_fuel_pct=25.0,
+    )
+    assert adder == pytest.approx(0.0)
+    assert import_eff == pytest.approx(cfg.weekday_off_peak_price)
+
+    curve = build_supply_curve(
+        solar_surplus_kw=0.0,
+        export_credit_per_kwh=cfg.export_credit_per_kwh,
+        import_price_per_kwh=import_eff,
+        panel_service_headroom_kw=cfg.limits.panel_service_headroom_kw,
+    )
+    result = dispatch(
+        curve,
+        bid_price_per_kwh=0.20,
+        evse_maximum_kw=7.7,
+        vehicle_maximum_kw=7.7,
+        panel_service_headroom_kw=7.7,
+        user_charging_limit_kw=7.7,
+    )
+    assert result.import_power_limit_kw == pytest.approx(cfg.limits.panel_service_headroom_kw)
+
+
+def test_carbon_unavailable_fail_closed_uses_max_adder():
+    """Why: missing Electricity Maps must not look like a clean grid and unlock import."""
+    carbon = CarbonPriceConfig(
+        enabled=True,
+        co2_intensity=CarbonSignalConfig(
+            threshold=250.0,
+            max_adder_per_kwh=0.50,
+        ),
+        unavailable_behavior="max_adder",
+    )
+    adder, reason = carbon_adder_per_kwh(
+        carbon,
+        co2_intensity_g_per_kwh=None,
+        fossil_fuel_pct=None,
+    )
+    assert adder == pytest.approx(0.50)
+    assert reason == "unavailable_max_adder"
+
+
+def test_read_active_flex_signals_uses_newest_event_only():
+    """
+    Why: stale OpenADR events with cheap PRICE must not keep charging after
+    the tariff engine publishes uneconomic sentinel 999.
+    """
+
+    def _event(start: datetime, price: float, import_kw: float):
+        return SimpleNamespace(
+            event_name=ACTIVE_EVENT_NAME,
+            interval_period=SimpleNamespace(start=start),
+            intervals=(
+                SimpleNamespace(
+                    payloads=(
+                        SimpleNamespace(type="PRICE", values=(price,)),
+                        SimpleNamespace(type="IMPORT_CAPACITY_LIMIT", values=(import_kw,)),
+                    )
+                ),
+            ),
+        )
+
+    older = _event(datetime(2026, 7, 20, 0, 30, tzinfo=UTC), 0.14, 7.68)
+    newer = _event(datetime(2026, 7, 20, 0, 43, tzinfo=UTC), 999.0, 0.0)
+
+    class _Ven:
+        class events:
+            @staticmethod
+            def get_events(**_kwargs):
+                # Oldest last: the old buggy reader would keep PRICE=0.14.
+                return [newer, older]
+
+    signals = read_active_flex_signals(_Ven())
+    assert signals["price"] == pytest.approx(999.0)
+    assert signals["import_power_limit_kw"] == pytest.approx(0.0)
 
