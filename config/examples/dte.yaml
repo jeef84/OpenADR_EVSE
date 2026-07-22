@@ -44,6 +44,8 @@ export:
 
 limits:
   panel_service_headroom_kw: 7.68
+  peak_demand_limit_kw: 12.0
+  peak_demand_adder_per_kwh: 0.50
   evse_max_amps: 48
   branch_max_amps: 40
   i_min_amps: 6

@@ -27,7 +27,7 @@ cp config/examples/dte.yaml config/tariff.yaml
 | `export.credit_per_kwh` | Opportunity cost of consuming otherwise-exported solar |
 | `carbon_price` | Optional: inflate grid import $/kWh from Electricity Maps |
 | `ready_by.*` | Deadline overlay sticky defaults (battery, target SOC, daily clock) |
-| `limits.*` | Site / EVSE hard limits and amp hysteresis |
+| `limits.*` | Site / EVSE hard limits, `peak_demand_limit_kw`, amp hysteresis |
 
 Include variable per-kWh surcharges in the fully loaded import prices. Exclude fixed monthly charges.
 
@@ -55,6 +55,20 @@ either dirty CO2 or dirty fossil can block grid import. Solar blocks are unchang
 Example with a MISO-like baseline (580 g / 80%): at 580/80 adder is **$0** (TOU vs bid
 decides). At 592 g (above) adder is **$0.50**, so off-peak $0.14 becomes $0.64 and fails
 a $0.16 bid.
+
+### Peak demand limit (price gate)
+
+Optional. When measured demand (`solar + import − export`) is **above**
+`peak_demand_limit_kw`, the tariff engine adds `peak_demand_adder_per_kwh` to the
+**grid import** block price (same hard-gate idea as carbon). A typical bid then
+rejects import until demand drops; solar export-credit blocks are unchanged.
+
+```yaml
+limits:
+  panel_service_headroom_kw: 7.68
+  peak_demand_limit_kw: 12.0          # 0 disables
+  peak_demand_adder_per_kwh: 0.50     # inflate import when over
+```
 
 ### Ready-by-departure defaults
 

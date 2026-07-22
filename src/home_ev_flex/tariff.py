@@ -20,6 +20,10 @@ class TariffLimits:
     i_min_amps: int
     amp_hysteresis_amps: float
     default_voltage_v: float
+    # When measured demand (solar+import-export) is above this, inflate grid import
+    # $/kWh by peak_demand_adder_per_kwh so the bid rejects (0 disables).
+    peak_demand_limit_kw: float = 0.0
+    peak_demand_adder_per_kwh: float = 0.50
 
 
 @dataclass(frozen=True)
@@ -154,6 +158,10 @@ def load_tariff_config(path: str | Path) -> TariffConfig:
             i_min_amps=int(limits["i_min_amps"]),
             amp_hysteresis_amps=float(limits["amp_hysteresis_amps"]),
             default_voltage_v=float(limits.get("default_voltage_v", 240.0)),
+            peak_demand_limit_kw=float(limits.get("peak_demand_limit_kw", 0.0)),
+            peak_demand_adder_per_kwh=float(
+                limits.get("peak_demand_adder_per_kwh", 0.50)
+            ),
         ),
         carbon_price=_load_carbon_price(raw),
         ready_by=_load_ready_by(raw),
@@ -224,20 +232,62 @@ def carbon_adder_per_kwh(
     return max(caps), "unavailable_max_adder"
 
 
+def site_demand_kw(
+    *,
+    solar_kw: float,
+    import_kw: float,
+    export_kw: float,
+) -> float:
+    """Measured site demand (kW): solar + import − export."""
+    return max(0.0, float(solar_kw) + float(import_kw) - float(export_kw))
+
+
+def peak_demand_adder_per_kwh(
+    *,
+    peak_demand_limit_kw: float,
+    adder_per_kwh: float,
+    demand_kw: float,
+) -> tuple[float, str]:
+    """
+    Hard gate on peak demand for grid-import price only.
+
+    At or below peak_demand_limit_kw → $0. Above → full adder (typical bid fails).
+    Disabled when peak_demand_limit_kw <= 0.
+    """
+    if float(peak_demand_limit_kw) <= 0:
+        return 0.0, "disabled"
+    if float(demand_kw) > float(peak_demand_limit_kw):
+        return max(0.0, float(adder_per_kwh)), "over_peak_demand"
+    return 0.0, "ok"
+
+
 def effective_import_price(
     cfg: TariffConfig,
     when: datetime,
     *,
     co2_intensity_g_per_kwh: float | None = None,
     fossil_fuel_pct: float | None = None,
+    demand_kw: float | None = None,
 ) -> tuple[float, float, str]:
-    """Return (effective_import, carbon_adder, adder_reason)."""
+    """
+    Return (effective_import, total_adder, adder_reason).
+
+    total_adder is max(carbon, peak_demand) so either dirty grid or demand over
+    the peak limit can make import uneconomic; solar export-credit blocks stay untouched.
+    """
     tou = resolve_import_price(cfg, when)
-    adder, reason = carbon_adder_per_kwh(
+    carbon_adder, carbon_reason = carbon_adder_per_kwh(
         cfg.carbon_price,
         co2_intensity_g_per_kwh=co2_intensity_g_per_kwh,
         fossil_fuel_pct=fossil_fuel_pct,
     )
+    demand_adder, demand_reason = peak_demand_adder_per_kwh(
+        peak_demand_limit_kw=cfg.limits.peak_demand_limit_kw,
+        adder_per_kwh=cfg.limits.peak_demand_adder_per_kwh,
+        demand_kw=0.0 if demand_kw is None else float(demand_kw),
+    )
+    adder = max(carbon_adder, demand_adder)
+    reason = demand_reason if demand_adder > carbon_adder else carbon_reason
     return tou + adder, adder, reason
 
 

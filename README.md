@@ -309,7 +309,7 @@ cp config/examples/dte.yaml config/tariff.yaml
 | `export.credit_per_kwh` | Opportunity cost of consuming otherwise-exported solar |
 | `carbon_price` | Optional: inflate grid import $/kWh from Electricity Maps |
 | `ready_by.*` | Deadline overlay sticky defaults (battery, target SOC, daily clock) |
-| `limits.*` | Site / EVSE hard limits and amp hysteresis |
+| `limits.*` | Site / EVSE hard limits, `peak_demand_limit_kw` (price gate when demand high), amp hysteresis |
 
 Include variable per-kWh surcharges in fully loaded import prices. Exclude fixed monthly charges.
 
