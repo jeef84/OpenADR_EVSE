@@ -65,7 +65,7 @@ Shared requirement: HA (or fixtures) and OpenEVSE must use the **same MQTT broke
 
 **2. Sensors you must already have in HA**
 
-The package does not create your inverter or CT entities. Wire these placeholders in `ha/packages/home_ev_flex.yaml` (SITE CONFIG header):
+The package does not create your inverter or CT entities. Start from `ha/packages/home_ev_flex_example.yaml` (stubs), copy to HA as `home_ev_flex.yaml`, and wire SITE CONFIG:
 
 | You provide | Units | Used for |
 | --- | --- | --- |
@@ -84,7 +84,7 @@ OpenEVSE power / energy / connected arrive over MQTT from the bridge (`openevse/
 
 **3. What the HA package creates for you**
 
-Copy `ha/packages/home_ev_flex.yaml` into HA `packages/` (enable packages in `configuration.yaml` if needed), edit SITE CONFIG, reload/restart. You get:
+Copy `ha/packages/home_ev_flex_example.yaml` into HA `packages/` as `home_ev_flex.yaml` (enable packages in `configuration.yaml` if needed), edit SITE CONFIG, reload/restart. You get:
 
 - Helpers: enable, mode, bid, user amp limit, voltage, ready-by / SOC sticky settings (see [HA helpers](#ha-helpers))
 - Template sensors that normalize solar/grid into FLEX kW entities
@@ -245,7 +245,7 @@ docker compose stop mqtt-fixtures
 High-level checklist (what you provide vs what the package creates): [Production checklist](#production-checklist-ha--openevse).
 
 1. Ensure HA can publish/subscribe to the same Mosquitto instance (MQTT integration).
-2. Copy `ha/packages/home_ev_flex.yaml` into your HA `packages/` directory (enable packages in `configuration.yaml` if needed).
+2. Copy `ha/packages/home_ev_flex_example.yaml` into your HA `packages/` directory as `home_ev_flex.yaml` (enable packages in `configuration.yaml` if needed).
 3. **Edit SITE CONFIG** in the file, before reload/restarting:
    - Replace every `sensor.YOUR_SOLAR_PRODUCTION_KW` with your solar production entity (**kW**).
    - Point `sensor.grid_import_power` / `sensor.grid_export_power` at your grid CT sensors (**watts** in the shipped templates; drop `/ 1000` if yours are already kW).

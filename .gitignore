@@ -1,4 +1,6 @@
 ha/ref_packages/
+# Site-wired HA package (entity IDs / serials); start from home_ev_flex_example.yaml
+ha/packages/home_ev_flex.local.yaml
 
 
 # Byte-compiled / optimized / DLL files

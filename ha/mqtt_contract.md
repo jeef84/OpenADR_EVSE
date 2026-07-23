@@ -17,9 +17,9 @@ HA telemetry/controls -> Mosquitto -> tariff engine -> VTN -> VEN
                                                    OpenEVSE
 ```
 
-HA (`ha/packages/home_ev_flex.yaml`) publishes site telemetry and user controls.
+HA (`ha/packages/home_ev_flex.yaml`; start from `home_ev_flex_example.yaml`) publishes site telemetry and user controls.
 It does **not** write EVSE amp setpoints. Edit the package `SITE CONFIG` placeholders
-(`sensor.YOUR_SOLAR_PRODUCTION_KW`, grid import/export entity IDs) for your site.
+(`sensor.YOUR_SOLAR_PRODUCTION_KW` in the example package, grid import/export entity IDs) for your site.
 
 If you also run a separate solar-divert controller on another charger, keep those
 control paths isolated so two automations do not fight over the same EVSE.
