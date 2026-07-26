@@ -21,6 +21,8 @@ from home_ev_flex.tariff import (
     grid_net_surplus_kw,
     load_tariff_config,
     resolve_import_price,
+    peak_demand_adder_per_kwh,
+    site_demand_kw,
     solar_only_target_kw,
     solar_surplus_kw,
 )
@@ -144,6 +146,58 @@ def test_example_utility_configs_load():
 def test_solar_surplus_is_non_negative():
     assert solar_surplus_kw(solar_kw=5.0, house_load_kw=2.0) == pytest.approx(3.0)
     assert solar_surplus_kw(solar_kw=1.0, house_load_kw=2.0) == pytest.approx(0.0)
+
+
+def test_peak_demand_limit_inflates_import_price_when_over():
+    """Why: AC/oven + EV over peak demand must fail the bid via price, not a hard amp clamp."""
+    demand = site_demand_kw(solar_kw=0.0, import_kw=14.188, export_kw=0.0)
+    assert demand == pytest.approx(14.188)
+    adder, reason = peak_demand_adder_per_kwh(
+        peak_demand_limit_kw=12.0,
+        adder_per_kwh=0.50,
+        demand_kw=demand,
+    )
+    assert adder == pytest.approx(0.50)
+    assert reason == "over_peak_demand"
+    cfg = load_tariff_config(TARIFF_PATH)
+    # Off-peak + demand adder → ~0.64 fails a 0.16 bid (carbon clean so only demand gates).
+    off_peak = datetime(2026, 7, 20, 20, 0, tzinfo=ZoneInfo(cfg.timezone))
+    import_eff, total_adder, adder_reason = effective_import_price(
+        cfg,
+        off_peak,
+        co2_intensity_g_per_kwh=500.0,
+        fossil_fuel_pct=50.0,
+        demand_kw=demand,
+    )
+    assert adder_reason == "over_peak_demand"
+    assert total_adder == pytest.approx(0.50)
+    assert import_eff == pytest.approx(cfg.weekday_off_peak_price + 0.50)
+
+
+def test_peak_demand_limit_no_adder_when_under():
+    adder, reason = peak_demand_adder_per_kwh(
+        peak_demand_limit_kw=12.0,
+        adder_per_kwh=0.50,
+        demand_kw=10.0,
+    )
+    assert adder == pytest.approx(0.0)
+    assert reason == "ok"
+
+
+def test_peak_demand_limit_disabled_when_zero():
+    adder, reason = peak_demand_adder_per_kwh(
+        peak_demand_limit_kw=0.0,
+        adder_per_kwh=0.50,
+        demand_kw=20.0,
+    )
+    assert adder == pytest.approx(0.0)
+    assert reason == "disabled"
+
+
+def test_tariff_yaml_loads_peak_demand_limit():
+    cfg = load_tariff_config(TARIFF_PATH)
+    assert cfg.limits.peak_demand_limit_kw == pytest.approx(12.0)
+    assert cfg.limits.peak_demand_adder_per_kwh == pytest.approx(0.50)
 
 
 def test_grid_net_surplus_matches_solar_minus_house_when_consistent():

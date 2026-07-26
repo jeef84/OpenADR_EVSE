@@ -44,8 +44,18 @@ export:
 
 limits:
   panel_service_headroom_kw: 7.68
+  peak_demand_limit_kw: 12.0
+  peak_demand_adder_per_kwh: 0.50
   evse_max_amps: 48
   branch_max_amps: 40
   i_min_amps: 6
   amp_hysteresis_amps: 2.5
   default_voltage_v: 240.0
+
+ready_by:
+  enabled: true
+  cushion_hours: 0.25
+  assumed_soc_pct: 40
+  battery_capacity_kwh: 74.7
+  target_soc_pct: 85
+  ready_by_time: "07:00"

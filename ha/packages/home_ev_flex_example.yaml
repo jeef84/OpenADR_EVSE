@@ -1,4 +1,8 @@
-# HOME_EV_FLEX Home Assistant package
+# HOME_EV_FLEX Home Assistant package (EXAMPLE / TEMPLATE)
+#
+# Copy this file to your HA packages/ as home_ev_flex.yaml, then replace
+# SITE CONFIG placeholders below. Keep site-specific entity IDs out of git
+# (e.g. ha/packages/home_ev_flex.local.yaml is gitignored).
 #
 # Publishes site telemetry + user controls to the Linux OpenADR stack.
 # Does NOT command the EVSE directly (VEN + openevse_bridge own amps).

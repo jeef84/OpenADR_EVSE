@@ -14,7 +14,12 @@ import paho.mqtt.client as mqtt
 from home_ev_flex import mqtt_topics as topics
 from home_ev_flex.openadr import create_bl_client, ensure_program, upsert_flex_event
 from home_ev_flex.supply_curve import build_supply_curve, dispatch
-from home_ev_flex.tariff import effective_import_price, load_tariff_config, solar_surplus_kw
+from home_ev_flex.tariff import (
+    effective_import_price,
+    load_tariff_config,
+    solar_surplus_kw,
+    site_demand_kw,
+)
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 logger = logging.getLogger("tariff_engine")
@@ -143,26 +148,32 @@ class TariffEngine:
         with self.state.lock:
             solar = self.state.solar_kw
             house = self.state.house_load_kw
+            grid_import = self.state.grid_import_kw
+            grid_export = self.state.grid_export_kw
             bid = self.state.bid_price_per_kwh
             user_amps = self.state.user_amp_limit
             voltage = self.state.voltage_v
             co2 = self.state.co2_intensity_g_per_kwh
             fossil = self.state.fossil_fuel_pct
 
+        demand = site_demand_kw(
+            solar_kw=solar, import_kw=grid_import, export_kw=grid_export
+        )
         now = datetime.now().astimezone()
-        import_price, carbon_adder, carbon_reason = effective_import_price(
+        import_price, import_adder, adder_reason = effective_import_price(
             self.cfg,
             now,
             co2_intensity_g_per_kwh=co2,
             fossil_fuel_pct=fossil,
+            demand_kw=demand,
         )
-        if self.cfg.carbon_price.enabled and carbon_reason.startswith("unavailable"):
+        if self.cfg.carbon_price.enabled and adder_reason.startswith("unavailable"):
             now_mono = time.monotonic()
             if now_mono - self._carbon_warn_mono >= 60.0:
                 logger.warning(
                     "carbon_price enabled but Electricity Maps MQTT missing (%s); "
                     "co2=%s fossil%%=%s (retrying; warn at most once/min)",
-                    carbon_reason,
+                    adder_reason,
                     co2,
                     fossil,
                 )
@@ -171,19 +182,20 @@ class TariffEngine:
         limits = self.cfg.limits
         user_kw = (user_amps * voltage) / 1000.0
         evse_kw = (min(limits.evse_max_amps, limits.branch_max_amps) * voltage) / 1000.0
+        headroom = limits.panel_service_headroom_kw
 
         curve = build_supply_curve(
             solar_surplus_kw=surplus,
             export_credit_per_kwh=self.cfg.export_credit_per_kwh,
             import_price_per_kwh=import_price,
-            panel_service_headroom_kw=limits.panel_service_headroom_kw,
+            panel_service_headroom_kw=headroom,
         )
         result = dispatch(
             curve,
             bid_price_per_kwh=bid,
             evse_maximum_kw=evse_kw,
             vehicle_maximum_kw=evse_kw,
-            panel_service_headroom_kw=limits.panel_service_headroom_kw,
+            panel_service_headroom_kw=headroom,
             user_charging_limit_kw=user_kw,
         )
 
@@ -205,7 +217,7 @@ class TariffEngine:
                 "" if result.effective_marginal_price is None else f"{result.effective_marginal_price:.6f}"
             ),
             topics.STATUS_IMPORT_LIMIT_KW: f"{result.import_power_limit_kw:.4f}",
-            topics.STATUS_CARBON_ADDER: f"{carbon_adder:.6f}",
+            topics.STATUS_CARBON_ADDER: f"{import_adder:.6f}",
             topics.STATUS_EFFECTIVE_IMPORT_PRICE: f"{import_price:.6f}",
         }
         for topic, value in status.items():
@@ -213,14 +225,15 @@ class TariffEngine:
 
         logger.info(
             "dispatch accepted=%.3f kW price=%s import_limit=%.3f surplus=%.3f "
-            "import_eff=%.3f carbon_adder=%.3f (%s) co2=%s fossil%%=%s",
+            "demand=%.3f import_eff=%.3f adder=%.3f (%s) co2=%s fossil%%=%s",
             result.accepted_power_kw,
             result.effective_marginal_price,
             result.import_power_limit_kw,
             surplus,
+            demand,
             import_price,
-            carbon_adder,
-            carbon_reason,
+            import_adder,
+            adder_reason,
             co2,
             fossil,
         )
