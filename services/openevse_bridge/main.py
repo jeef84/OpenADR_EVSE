@@ -83,6 +83,29 @@ def session_connected(*, status: str, vehicle: str | None, state: str | None) ->
     return False
 
 
+def should_reassert_on_plug(
+    *, was_connected: bool, is_connected: bool
+) -> bool:
+    """
+    Why: plug-in can clear a disabled claim and resume Auto at ~30 A while FLEX
+    still desires 0 A (or a prior setpoint). Re-assert ownership on the edge.
+    """
+    return (not was_connected) and is_connected
+
+
+def should_watchdog_stop(
+    *,
+    desired_amps: int,
+    measured_watts: float,
+    threshold_watts: float,
+) -> bool:
+    """
+    Why: if OpenEVSE draws power while FLEX commanded stop, re-publish disabled
+    claim/override instead of trusting the last no-op skip.
+    """
+    return desired_amps <= 0 and measured_watts >= threshold_watts
+
+
 def _stop_payload(stop_mode: str, *, auto_release: bool) -> str:
     """
     How FLEX holds a stop.
@@ -197,11 +220,17 @@ class OpenEvseBridge:
             )
         # No device MQTT for this long => gateway offline; clear stale power.
         self.offline_sec = float(_env("OPENEVSE_OFFLINE_SEC", "60"))
+        # Re-assert stop when measured power exceeds this while desired is 0 A.
+        self.unauthorized_watts = float(_env("OPENEVSE_UNAUTHORIZED_WATTS", "500"))
+        # Min seconds between plug/watchdog force re-applies (avoid MQTT storms).
+        self.reassert_cooldown_sec = float(_env("OPENEVSE_REASSERT_SEC", "15"))
         self._desired = 0
         self._last_sent: int | None = None
         self._applied = 0
         self._gateway_online = False
         self._last_device_seen = 0.0
+        self._last_reassert = 0.0
+        self._session_connected = False
         self._evse_status = ""
         self._evse_state: str | None = None
         self._vehicle: str | None = None
@@ -242,12 +271,33 @@ class OpenEvseBridge:
             self._applied = applied
         self._mqtt.publish(topics.OPENEVSE_APPLIED_AMPS, str(self._applied), qos=0, retain=True)
 
+    def _cooldown_ok(self) -> bool:
+        return (time.monotonic() - self._last_reassert) >= self.reassert_cooldown_sec
+
+    def _force_reapply(self, *, reason: str) -> None:
+        """Force publish desired setpoint even when unchanged (plug-in / watchdog)."""
+        if not self._cooldown_ok():
+            return
+        logger.warning(
+            "OpenEVSE re-assert %sA reason=%s",
+            self._desired,
+            reason,
+        )
+        self._last_reassert = time.monotonic()
+        self._apply(self._desired, force=True)
+
     def _publish_session_connected(self) -> None:
         connected = self._gateway_online and session_connected(
             status=self._evse_status,
             vehicle=self._vehicle,
             state=self._evse_state,
         )
+        if should_reassert_on_plug(
+            was_connected=self._session_connected, is_connected=connected
+        ):
+            # Plug-in can drop a disabled claim; re-own stop or charge setpoint.
+            self._force_reapply(reason="vehicle_connected")
+        self._session_connected = connected
         self._mqtt.publish(
             topics.OPENEVSE_CONNECTED,
             "true" if connected else "false",
@@ -348,6 +398,14 @@ class OpenEvseBridge:
             try:
                 watts = float(payload)
                 self._mqtt.publish(topics.OPENEVSE_POWER_KW, f"{watts / 1000.0:.4f}", qos=0, retain=True)
+                if should_watchdog_stop(
+                    desired_amps=self._desired,
+                    measured_watts=watts,
+                    threshold_watts=self.unauthorized_watts,
+                ):
+                    self._force_reapply(
+                        reason=f"unauthorized_power_{watts:.0f}W"
+                    )
             except ValueError:
                 logger.warning("bad power payload %r", payload)
         elif msg.topic == f"{self.base_topic}/wh" and payload:
@@ -370,7 +428,8 @@ class OpenEvseBridge:
         self._mqtt.connect(self.mqtt_host, self.mqtt_port, 60)
         self._mqtt.loop_start()
         logger.info(
-            "OpenEVSE bridge running host=%s:%s base=%s control=%s limits=%s-%sA offline_sec=%s",
+            "OpenEVSE bridge running host=%s:%s base=%s control=%s limits=%s-%sA "
+            "offline_sec=%s unauthorized_watts=%.0f reassert_sec=%.0f",
             self.mqtt_host,
             self.mqtt_port,
             self.base_topic,
@@ -378,6 +437,8 @@ class OpenEvseBridge:
             self.i_min,
             self.i_max,
             self.offline_sec,
+            self.unauthorized_watts,
+            self.reassert_cooldown_sec,
         )
         while not self._stop.wait(2.0):
             self._check_liveness()

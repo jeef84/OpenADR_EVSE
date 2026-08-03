@@ -9,6 +9,12 @@ from zoneinfo import ZoneInfo
 
 import yaml
 
+from home_ev_flex.carbon_adaptive import (
+    AdaptiveCarbonConfig,
+    AdaptiveThresholdResult,
+    CarbonHistoryStore,
+    resolve_adaptive_thresholds,
+)
 from home_ev_flex.deadline import ReadyByConfig, parse_ready_by_hhmm
 
 
@@ -34,6 +40,8 @@ class CarbonSignalConfig:
     max_adder_per_kwh: float
     # Optional legacy field; ignored by the step gate (kept for older YAML).
     dollars_per_unit: float = 0.0
+    # Absolute floor when adaptive learning is enabled (how clean we may target).
+    min_threshold: float | None = None
 
 
 @dataclass(frozen=True)
@@ -45,6 +53,9 @@ class CarbonPriceConfig:
     Each signal is a hard gate: value <= threshold permits (adder 0);
     value > threshold applies max_adder_per_kwh (blocks typical bids).
     Solar export-credit blocks are never inflated.
+
+    When adaptive.enabled, YAML threshold is the ceiling; learned off-peak
+    percentile + ready-by slack set the effective permit gate.
     """
 
     enabled: bool = False
@@ -53,6 +64,7 @@ class CarbonPriceConfig:
     # max_adder: treat missing MQTT as dirty (do not silently import).
     # zero: ignore carbon until a reading arrives (logs should warn).
     unavailable_behavior: str = "max_adder"
+    adaptive: AdaptiveCarbonConfig = field(default_factory=AdaptiveCarbonConfig)
 
 
 @dataclass(frozen=True)
@@ -89,13 +101,38 @@ def _export_credit(raw: dict) -> float:
     raise KeyError("export.credit_per_kwh is required")
 
 
-def _carbon_signal(raw: dict | None, *, threshold_key: str) -> CarbonSignalConfig | None:
+def _carbon_signal(
+    raw: dict | None,
+    *,
+    threshold_key: str,
+    min_threshold_key: str,
+    default_min: float,
+) -> CarbonSignalConfig | None:
     if not raw:
         return None
+    min_raw = raw.get(min_threshold_key)
     return CarbonSignalConfig(
         threshold=float(raw[threshold_key]),
         max_adder_per_kwh=float(raw.get("max_adder_per_kwh", 0.50)),
         dollars_per_unit=float(raw.get("dollars_per_unit", 0.0)),
+        min_threshold=float(default_min if min_raw is None else min_raw),
+    )
+
+
+def _load_adaptive_carbon(raw: dict) -> AdaptiveCarbonConfig:
+    section = raw.get("adaptive") or {}
+    if not section:
+        return AdaptiveCarbonConfig()
+    return AdaptiveCarbonConfig(
+        enabled=bool(section.get("enabled", False)),
+        lookback_days=int(section.get("lookback_days", 14)),
+        sample_interval_sec=float(section.get("sample_interval_sec", 300)),
+        percentile=float(section.get("percentile", 25)),
+        min_samples=int(section.get("min_samples", 288)),
+        slack_high_hours=float(section.get("slack_high_hours", 4.0)),
+        state_path=str(
+            section.get("state_path", "/data/carbon_adaptive/carbon_history.json")
+        ),
     )
 
 
@@ -113,12 +150,17 @@ def _load_carbon_price(raw: dict) -> CarbonPriceConfig:
         co2_intensity=_carbon_signal(
             section.get("co2_intensity"),
             threshold_key="threshold_g_per_kwh",
+            min_threshold_key="min_threshold_g_per_kwh",
+            default_min=350.0,
         ),
         fossil_fuel_pct=_carbon_signal(
             section.get("fossil_fuel_pct"),
             threshold_key="threshold_pct",
+            min_threshold_key="min_threshold_pct",
+            default_min=50.0,
         ),
         unavailable_behavior=behavior,
+        adaptive=_load_adaptive_carbon(section),
     )
 
 
@@ -184,15 +226,43 @@ def resolve_import_price(cfg: TariffConfig, when: datetime) -> float:
     return cfg.weekday_off_peak_price
 
 
-def _signal_adder(value: float | None, signal: CarbonSignalConfig | None) -> float | None:
+def _signal_adder(
+    value: float | None,
+    signal: CarbonSignalConfig | None,
+    *,
+    threshold_override: float | None = None,
+) -> float | None:
     """Hard gate: <= threshold → 0; above → max_adder. None if unconfigured / missing."""
     if signal is None:
         return None
     if value is None:
         return None
-    if float(value) <= signal.threshold:
+    gate = signal.threshold if threshold_override is None else float(threshold_override)
+    if float(value) <= gate:
         return 0.0
     return signal.max_adder_per_kwh
+
+
+def effective_carbon_thresholds(
+    cfg: CarbonPriceConfig,
+    *,
+    history: CarbonHistoryStore | None = None,
+    slack_hours: float | None = None,
+    slack_low_hours: float = 0.25,
+) -> AdaptiveThresholdResult:
+    """Resolve adaptive or static permit thresholds for CO2 / fossil signals."""
+    co2 = cfg.co2_intensity
+    fossil = cfg.fossil_fuel_pct
+    return resolve_adaptive_thresholds(
+        adaptive=cfg.adaptive,
+        co2_ceiling=None if co2 is None else co2.threshold,
+        fossil_ceiling=None if fossil is None else fossil.threshold,
+        co2_min=None if co2 is None else co2.min_threshold,
+        fossil_min=None if fossil is None else fossil.min_threshold,
+        history=history,
+        slack_hours=slack_hours,
+        slack_low_hours=slack_low_hours,
+    )
 
 
 def carbon_adder_per_kwh(
@@ -200,22 +270,33 @@ def carbon_adder_per_kwh(
     *,
     co2_intensity_g_per_kwh: float | None,
     fossil_fuel_pct: float | None,
+    co2_threshold: float | None = None,
+    fossil_threshold: float | None = None,
 ) -> tuple[float, str]:
     """
     Carbon $/kWh adder for the grid_import supply block.
 
-    Returns (adder, reason). reason is for logs/status, not OpenADR.
+    Optional co2_threshold / fossil_threshold override the YAML ceilings
+    (used by adaptive learning). Returns (adder, reason).
     """
     if not cfg.enabled:
         return 0.0, "disabled"
 
     adders: list[float] = []
     if cfg.co2_intensity is not None:
-        adder = _signal_adder(co2_intensity_g_per_kwh, cfg.co2_intensity)
+        adder = _signal_adder(
+            co2_intensity_g_per_kwh,
+            cfg.co2_intensity,
+            threshold_override=co2_threshold,
+        )
         if adder is not None:
             adders.append(adder)
     if cfg.fossil_fuel_pct is not None:
-        adder = _signal_adder(fossil_fuel_pct, cfg.fossil_fuel_pct)
+        adder = _signal_adder(
+            fossil_fuel_pct,
+            cfg.fossil_fuel_pct,
+            threshold_override=fossil_threshold,
+        )
         if adder is not None:
             adders.append(adder)
 
@@ -268,6 +349,9 @@ def effective_import_price(
     co2_intensity_g_per_kwh: float | None = None,
     fossil_fuel_pct: float | None = None,
     demand_kw: float | None = None,
+    history: CarbonHistoryStore | None = None,
+    slack_hours: float | None = None,
+    thresholds: AdaptiveThresholdResult | None = None,
 ) -> tuple[float, float, str]:
     """
     Return (effective_import, total_adder, adder_reason).
@@ -276,10 +360,18 @@ def effective_import_price(
     the peak limit can make import uneconomic; solar export-credit blocks stay untouched.
     """
     tou = resolve_import_price(cfg, when)
+    thr = thresholds or effective_carbon_thresholds(
+        cfg.carbon_price,
+        history=history,
+        slack_hours=slack_hours,
+        slack_low_hours=cfg.ready_by.cushion_hours,
+    )
     carbon_adder, carbon_reason = carbon_adder_per_kwh(
         cfg.carbon_price,
         co2_intensity_g_per_kwh=co2_intensity_g_per_kwh,
         fossil_fuel_pct=fossil_fuel_pct,
+        co2_threshold=thr.co2_threshold,
+        fossil_threshold=thr.fossil_threshold,
     )
     demand_adder, demand_reason = peak_demand_adder_per_kwh(
         peak_demand_limit_kw=cfg.limits.peak_demand_limit_kw,

@@ -225,6 +225,44 @@ mqtt:
       state_class: measurement
       value_template: "{{ value | float(0) }}"
 
+    - name: "HOME EV FLEX Effective CO2 Threshold"
+      unique_id: home_ev_flex_effective_co2_threshold
+      state_topic: "home_ev_flex/status/effective_co2_threshold_g_per_kwh"
+      unit_of_measurement: "g/kWh"
+      state_class: measurement
+      value_template: "{{ value | float(0) }}"
+
+    - name: "HOME EV FLEX Learned CO2 Floor"
+      unique_id: home_ev_flex_learned_co2_floor
+      state_topic: "home_ev_flex/status/learned_co2_floor_g_per_kwh"
+      unit_of_measurement: "g/kWh"
+      state_class: measurement
+      value_template: "{{ value | float(0) }}"
+
+    - name: "HOME EV FLEX Effective Fossil Threshold"
+      unique_id: home_ev_flex_effective_fossil_threshold
+      state_topic: "home_ev_flex/status/effective_fossil_threshold_pct"
+      unit_of_measurement: "%"
+      state_class: measurement
+      value_template: "{{ value | float(0) }}"
+
+    - name: "HOME EV FLEX Learned Fossil Floor"
+      unique_id: home_ev_flex_learned_fossil_floor
+      state_topic: "home_ev_flex/status/learned_fossil_floor_pct"
+      unit_of_measurement: "%"
+      state_class: measurement
+      value_template: "{{ value | float(0) }}"
+
+    - name: "HOME EV FLEX Carbon Adaptive Reason"
+      unique_id: home_ev_flex_carbon_adaptive_reason
+      state_topic: "home_ev_flex/status/carbon_adaptive_reason"
+
+    - name: "HOME EV FLEX Carbon Urgency"
+      unique_id: home_ev_flex_carbon_urgency
+      state_topic: "home_ev_flex/status/carbon_urgency"
+      state_class: measurement
+      value_template: "{{ value | float(0) }}"
+
     - name: "HOME EV FLEX Effective SOC"
       unique_id: home_ev_flex_effective_soc
       state_topic: "home_ev_flex/status/effective_soc_pct"

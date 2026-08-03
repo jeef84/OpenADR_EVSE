@@ -333,16 +333,28 @@ carbon_price:
   enabled: true
   unavailable_behavior: max_adder  # or zero
   co2_intensity:
-    threshold_g_per_kwh: 580
+    threshold_g_per_kwh: 580       # YAML ceiling
+    min_threshold_g_per_kwh: 350
     max_adder_per_kwh: 0.50
   fossil_fuel_pct:
     threshold_pct: 80
+    min_threshold_pct: 50
     max_adder_per_kwh: 0.50
+  adaptive:
+    enabled: true                  # learn cleaner floor; ratchet with slack
+    lookback_days: 14              # off-peak samples only
+    percentile: 25
+    min_samples: 288
+    slack_high_hours: 4.0
 ```
 
-Each signal is a hard gate: at or below threshold → adder $0; above → `max_adder_per_kwh`. Final adder is the **max** of available signals. If enabled and no MQTT reading has arrived, `unavailable_behavior: max_adder` (default) applies the max so the stack does not silently import on a dirty or unknown grid.
+Each signal is a hard gate: at or below effective threshold → adder $0; above → `max_adder_per_kwh`. Final adder is the **max** of available signals. If enabled and no MQTT reading has arrived, `unavailable_behavior: max_adder` (default) applies the max so the stack does not silently import on a dirty or unknown grid.
 
-Status topics: `home_ev_flex/status/carbon_adder_per_kwh`, `home_ev_flex/status/effective_import_price_per_kwh`.
+With `adaptive.enabled`, YAML thresholds are the ceiling. The tariff engine learns an off-peak percentile floor (14-day history) and raises the effective gate toward that ceiling as ready-by slack shrinks. Cold start or missing slack keeps the static YAML gate. See [docs/tariff-config.md](docs/tariff-config.md).
+
+History lives under [`data/carbon_adaptive/`](data/carbon_adaptive/README.md) (`carbon_history.json` + auto-updated `carbon_history.html`). Survives compose stop/down; delete that directory to reset learning.
+
+Status topics: `home_ev_flex/status/carbon_adder_per_kwh`, `home_ev_flex/status/effective_import_price_per_kwh`, plus effective/learned CO2 and fossil thresholds.
 
 ---
 
@@ -502,6 +514,7 @@ Core library modules (`src/home_ev_flex/`):
 | Module | Responsibility |
 | --- | --- |
 | `tariff.py` | YAML load, TOU resolve, carbon adder, surplus helpers |
+| `carbon_adaptive.py` | Off-peak history + slack ratchet for carbon thresholds |
 | `supply_curve.py` | Marginal blocks + bid dispatch |
 | `amperage.py` | Floor quantization, hysteresis, 1-5 A ban |
 | `deadline.py` | Ready-by slack, assumed SOC, force decision |
