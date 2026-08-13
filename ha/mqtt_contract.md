@@ -82,6 +82,8 @@ Bridge hardware mapping (`OPENEVSE_CONTROL`, default `claim`; base topic default
 
 Stop always quiets **both** claim and override so a leftover MQTT claim cannot hold the 6 A floor after an override-only clear (the failure mode behind a persistent UI `mqtt` badge at 6 A).
 
+The bridge also **re-asserts** the desired setpoint on vehicle plug-in, and again if measured power stays above `OPENEVSE_UNAUTHORIZED_WATTS` (default 500 W) while FLEX desires 0 A (cooldown `OPENEVSE_REASSERT_SEC`, default 15 s). That covers OpenEVSE resuming Auto after connect while VEN still commands stop.
+
 FLEX also publishes `{base}/divertmode/set` → `1` (Normal) on charge/stop. OpenEVSE **Eco divert** can claim at priority 1100 and beat MQTT (500), which leaves **SETPOINT at ~6 A** while **Max Current** stays 32 A. This OpenEVSE is FLEX-owned; leave gateway divert on Normal / Fast, not Eco. Enphase Soleil can still do solar follow on its own charger.
 
 The bridge ignores **retained** `openevse/cmd/current_limit` (HA convenience retain); only live VEN publishes change hardware. That avoids a brief stale 32 A pulse on bridge reconnect.
@@ -130,12 +132,23 @@ Each signal is a hard permit gate: at or below threshold → adder $0; above →
 `max_adder_per_kwh`. Solar export-credit blocks are unchanged. Your bid still decides
 acceptance when the gate permits.
 
+When `carbon_price.adaptive.enabled` is true, YAML thresholds are the **ceiling**. The
+tariff engine learns an off-peak p25 floor from a 14-day history and ratchets the
+effective gate toward the ceiling as `status/slack_hours` shrinks. Missing slack or
+cold start (fewer than `min_samples`) keeps the static YAML gate.
+
 Status topics (tariff engine → HA):
 
 | Topic | Meaning |
 | --- | --- |
 | `home_ev_flex/status/carbon_adder_per_kwh` | Active carbon overlay ($/kWh) |
 | `home_ev_flex/status/effective_import_price_per_kwh` | TOU + carbon adder |
+| `home_ev_flex/status/effective_co2_threshold_g_per_kwh` | Active CO2 permit gate |
+| `home_ev_flex/status/learned_co2_floor_g_per_kwh` | Learned clean CO2 floor |
+| `home_ev_flex/status/effective_fossil_threshold_pct` | Active fossil permit gate |
+| `home_ev_flex/status/learned_fossil_floor_pct` | Learned clean fossil floor |
+| `home_ev_flex/status/carbon_adaptive_reason` | `disabled` / `cold_start` / `missing_slack` / `adaptive` |
+| `home_ev_flex/status/carbon_urgency` | Slack urgency 0 (floor) to 1 (ceiling) |
 
 If carbon is enabled and no MQTT reading has arrived, `unavailable_behavior: max_adder`
 (default) applies the configured max adder so the stack does not silently import on a

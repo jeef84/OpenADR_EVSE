@@ -74,8 +74,11 @@ services:
       BL_CLIENT_SECRET: ${BL_CLIENT_SECRET:-bl-client}
       TARIFF_CONFIG: /config/tariff.yaml
       ENGINE_INTERVAL_SEC: ${ENGINE_INTERVAL_SEC:-5}
+      CARBON_HISTORY_PATH: /data/carbon_adaptive/carbon_history.json
     volumes:
       - ../config:/config:ro
+      # Survives stop/down; wipe only by deleting this host directory.
+      - ../data/carbon_adaptive:/data/carbon_adaptive
     depends_on:
       mosquitto:
         condition: service_started
@@ -129,6 +132,9 @@ services:
       OPENEVSE_STOP_MODE: ${OPENEVSE_STOP_MODE:-disabled}
       # Clear stale power / defer commands if no device MQTT for this long.
       OPENEVSE_OFFLINE_SEC: ${OPENEVSE_OFFLINE_SEC:-60}
+      # Re-assert stop if EVSE draws watts while desired is 0 A; cooldown between forces.
+      OPENEVSE_UNAUTHORIZED_WATTS: ${OPENEVSE_UNAUTHORIZED_WATTS:-500}
+      OPENEVSE_REASSERT_SEC: ${OPENEVSE_REASSERT_SEC:-15}
     depends_on:
       mosquitto:
         condition: service_started
