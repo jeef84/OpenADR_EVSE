@@ -36,14 +36,25 @@ export:
 #   enabled: true
 #   unavailable_behavior: max_adder
 #   co2_intensity:
-#     threshold_g_per_kwh: 580   # permit at or below (local "good")
-#     max_adder_per_kwh: 0.50    # full adder when above
+#     threshold_g_per_kwh: 580   # YAML ceiling (local "good")
+#     min_threshold_g_per_kwh: 350
+#     max_adder_per_kwh: 0.50    # full adder when above effective threshold
 #   fossil_fuel_pct:
 #     threshold_pct: 80
+#     min_threshold_pct: 50
 #     max_adder_per_kwh: 0.50
+#   adaptive:
+#     enabled: true
+#     lookback_days: 14
+#     sample_interval_sec: 300
+#     percentile: 25
+#     min_samples: 288
+#     slack_high_hours: 4.0
 
 limits:
   panel_service_headroom_kw: 7.68
+  peak_demand_limit_kw: 12.0
+  peak_demand_adder_per_kwh: 0.50
   evse_max_amps: 48
   branch_max_amps: 40
   i_min_amps: 6

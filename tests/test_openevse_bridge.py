@@ -9,6 +9,8 @@ from services.openevse_bridge.main import (
     gateway_state_from_announce,
     normalize_amps,
     session_connected,
+    should_reassert_on_plug,
+    should_watchdog_stop,
 )
 
 
@@ -109,3 +111,33 @@ def test_rapi_legacy_fs_fc_sc():
 def test_control_unknown_mode_raises():
     with pytest.raises(ValueError):
         control_command("nope", 6, base_topic="openevse")
+
+
+def test_reassert_only_on_plug_edge():
+    """Why: overnight 22 kWh after 12:58 plug-in while FLEX held 0 A — must re-own on connect."""
+    assert should_reassert_on_plug(was_connected=False, is_connected=True) is True
+    assert should_reassert_on_plug(was_connected=True, is_connected=True) is False
+    assert should_reassert_on_plug(was_connected=True, is_connected=False) is False
+    assert should_reassert_on_plug(was_connected=False, is_connected=False) is False
+
+
+def test_watchdog_stop_only_when_desired_zero_and_power_high():
+    """Why: measured ~7 kW with cmd=0A means OpenEVSE escaped; re-assert disabled claim."""
+    assert (
+        should_watchdog_stop(
+            desired_amps=0, measured_watts=7300.0, threshold_watts=500.0
+        )
+        is True
+    )
+    assert (
+        should_watchdog_stop(
+            desired_amps=0, measured_watts=100.0, threshold_watts=500.0
+        )
+        is False
+    )
+    assert (
+        should_watchdog_stop(
+            desired_amps=16, measured_watts=7300.0, threshold_watts=500.0
+        )
+        is False
+    )

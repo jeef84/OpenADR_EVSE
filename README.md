@@ -65,7 +65,7 @@ Shared requirement: HA (or fixtures) and OpenEVSE must use the **same MQTT broke
 
 **2. Sensors you must already have in HA**
 
-The package does not create your inverter or CT entities. Wire these placeholders in `ha/packages/home_ev_flex.yaml` (SITE CONFIG header):
+The package does not create your inverter or CT entities. Start from `ha/packages/home_ev_flex_example.yaml` (stubs), copy to HA as `home_ev_flex.yaml`, and wire SITE CONFIG:
 
 | You provide | Units | Used for |
 | --- | --- | --- |
@@ -84,7 +84,7 @@ OpenEVSE power / energy / connected arrive over MQTT from the bridge (`openevse/
 
 **3. What the HA package creates for you**
 
-Copy `ha/packages/home_ev_flex.yaml` into HA `packages/` (enable packages in `configuration.yaml` if needed), edit SITE CONFIG, reload/restart. You get:
+Copy `ha/packages/home_ev_flex_example.yaml` into HA `packages/` as `home_ev_flex.yaml` (enable packages in `configuration.yaml` if needed), edit SITE CONFIG, reload/restart. You get:
 
 - Helpers: enable, mode, bid, user amp limit, voltage, ready-by / SOC sticky settings (see [HA helpers](#ha-helpers))
 - Template sensors that normalize solar/grid into FLEX kW entities
@@ -222,7 +222,7 @@ mqtt-fixtures --host localhost --scenario below_imin --once
 | `charge_now` | User amp limit (24 A); ignores price |
 | `stopped` | Always 0 A |
 | `below_imin` | Surplus maps below 6 A → stop |
-| `deadline_force` | Dirty grid + overdue ready-by → force charge despite carbon |
+| `deadline_force` | Dirty grid + ready-by too soon (run off-peak) → force despite carbon |
 
 ---
 
@@ -245,7 +245,7 @@ docker compose stop mqtt-fixtures
 High-level checklist (what you provide vs what the package creates): [Production checklist](#production-checklist-ha--openevse).
 
 1. Ensure HA can publish/subscribe to the same Mosquitto instance (MQTT integration).
-2. Copy `ha/packages/home_ev_flex.yaml` into your HA `packages/` directory (enable packages in `configuration.yaml` if needed).
+2. Copy `ha/packages/home_ev_flex_example.yaml` into your HA `packages/` directory as `home_ev_flex.yaml` (enable packages in `configuration.yaml` if needed).
 3. **Edit SITE CONFIG** in the file, before reload/restarting:
    - Replace every `sensor.YOUR_SOLAR_PRODUCTION_KW` with your solar production entity (**kW**).
    - Point `sensor.grid_import_power` / `sensor.grid_export_power` at your grid CT sensors (**watts** in the shipped templates; drop `/ 1000` if yours are already kW).
@@ -281,7 +281,7 @@ Full topic contract: [ha/mqtt_contract.md](ha/mqtt_contract.md).
 | `charge_now` | User amp limit; ignores price |
 | `stopped` | Always 0 A |
 
-**Ready-by overlay** (on `economic` / `solar_only`): when energy needed cannot finish by the daily ready-by clock, VEN force-charges at the user amp limit (ignores price/carbon). Sticky defaults: 74.7 kWh, 85% target, 07:00. Missing SOC assumes 40%. Once effective SOC reaches the sticky target, automatic modes stop (`charge_now` still bypasses).
+**Ready-by overlay** (on `economic` / `solar_only`): when energy needed cannot finish in the remaining **off-peak** hours before the next daily ready-by clock (rolls to tomorrow after today’s time passes), VEN force-charges at the user amp limit (ignores bid/carbon). Never forces during weekday on-peak; solar/economic keep running until off-peak. Sticky defaults: 74.7 kWh, 85% target, 07:00. Missing SOC assumes 40%. Once effective SOC reaches the sticky target, automatic modes stop (`charge_now` still bypasses).
 
 VEN never commands 1-5 A: anything below `i_min_amps` (default 6) becomes a stop.
 
@@ -309,7 +309,7 @@ cp config/examples/dte.yaml config/tariff.yaml
 | `export.credit_per_kwh` | Opportunity cost of consuming otherwise-exported solar |
 | `carbon_price` | Optional: inflate grid import $/kWh from Electricity Maps |
 | `ready_by.*` | Deadline overlay sticky defaults (battery, target SOC, daily clock) |
-| `limits.*` | Site / EVSE hard limits and amp hysteresis |
+| `limits.*` | Site / EVSE hard limits, `peak_demand_limit_kw` (price gate when demand high), amp hysteresis |
 
 Include variable per-kWh surcharges in fully loaded import prices. Exclude fixed monthly charges.
 
@@ -333,16 +333,28 @@ carbon_price:
   enabled: true
   unavailable_behavior: max_adder  # or zero
   co2_intensity:
-    threshold_g_per_kwh: 580
+    threshold_g_per_kwh: 580       # YAML ceiling
+    min_threshold_g_per_kwh: 350
     max_adder_per_kwh: 0.50
   fossil_fuel_pct:
     threshold_pct: 80
+    min_threshold_pct: 50
     max_adder_per_kwh: 0.50
+  adaptive:
+    enabled: true                  # learn cleaner floor; ratchet with slack
+    lookback_days: 14              # off-peak samples only
+    percentile: 25
+    min_samples: 288
+    slack_high_hours: 4.0
 ```
 
-Each signal is a hard gate: at or below threshold → adder $0; above → `max_adder_per_kwh`. Final adder is the **max** of available signals. If enabled and no MQTT reading has arrived, `unavailable_behavior: max_adder` (default) applies the max so the stack does not silently import on a dirty or unknown grid.
+Each signal is a hard gate: at or below effective threshold → adder $0; above → `max_adder_per_kwh`. Final adder is the **max** of available signals. If enabled and no MQTT reading has arrived, `unavailable_behavior: max_adder` (default) applies the max so the stack does not silently import on a dirty or unknown grid.
 
-Status topics: `home_ev_flex/status/carbon_adder_per_kwh`, `home_ev_flex/status/effective_import_price_per_kwh`.
+With `adaptive.enabled`, YAML thresholds are the ceiling. The tariff engine learns an off-peak percentile floor (14-day history) and raises the effective gate toward that ceiling as ready-by slack shrinks. Cold start or missing slack keeps the static YAML gate. See [docs/tariff-config.md](docs/tariff-config.md).
+
+History lives under [`data/carbon_adaptive/`](data/carbon_adaptive/README.md) (`carbon_history.json` + auto-updated `carbon_history.html`). Survives compose stop/down; delete that directory to reset learning.
+
+Status topics: `home_ev_flex/status/carbon_adder_per_kwh`, `home_ev_flex/status/effective_import_price_per_kwh`, plus effective/learned CO2 and fossil thresholds.
 
 ---
 
@@ -502,6 +514,7 @@ Core library modules (`src/home_ev_flex/`):
 | Module | Responsibility |
 | --- | --- |
 | `tariff.py` | YAML load, TOU resolve, carbon adder, surplus helpers |
+| `carbon_adaptive.py` | Off-peak history + slack ratchet for carbon thresholds |
 | `supply_curve.py` | Marginal blocks + bid dispatch |
 | `amperage.py` | Floor quantization, hysteresis, 1-5 A ban |
 | `deadline.py` | Ready-by slack, assumed SOC, force decision |

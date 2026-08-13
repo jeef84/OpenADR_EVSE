@@ -8,13 +8,21 @@ import signal
 import threading
 import time
 from dataclasses import dataclass, field
+from datetime import datetime
 
 import paho.mqtt.client as mqtt
 
 from home_ev_flex import mqtt_topics as topics
+from home_ev_flex.carbon_adaptive import CarbonHistoryStore
 from home_ev_flex.openadr import create_bl_client, ensure_program, upsert_flex_event
 from home_ev_flex.supply_curve import build_supply_curve, dispatch
-from home_ev_flex.tariff import effective_import_price, load_tariff_config, solar_surplus_kw
+from home_ev_flex.tariff import (
+    effective_carbon_thresholds,
+    effective_import_price,
+    load_tariff_config,
+    solar_surplus_kw,
+    site_demand_kw,
+)
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 logger = logging.getLogger("tariff_engine")
@@ -30,6 +38,12 @@ def _optional_float(payload: str) -> float | None:
         return None
 
 
+def _fmt_optional(value: float | None, digits: int = 3) -> str:
+    if value is None:
+        return ""
+    return f"{value:.{digits}f}"
+
+
 @dataclass
 class TelemetryState:
     solar_kw: float = 0.0
@@ -39,6 +53,7 @@ class TelemetryState:
     voltage_v: float = 240.0
     co2_intensity_g_per_kwh: float | None = None
     fossil_fuel_pct: float | None = None
+    slack_hours: float | None = None
     mode: str = "economic"
     bid_price_per_kwh: float = 0.16
     user_amp_limit: int = 32
@@ -69,6 +84,21 @@ class TariffEngine:
         self._program_id: str | None = None
         self._bl = None
         self._carbon_warn_mono = 0.0
+        self._slack_warn_mono = 0.0
+        self._history_save_mono = 0.0
+        adaptive = self.cfg.carbon_price.adaptive
+        history_path = _env("CARBON_HISTORY_PATH", adaptive.state_path)
+        self._history: CarbonHistoryStore | None = None
+        if self.cfg.carbon_price.enabled and adaptive.enabled:
+            self._history = CarbonHistoryStore(
+                history_path, lookback_days=adaptive.lookback_days
+            )
+            logger.info(
+                "carbon adaptive history path=%s lookback_days=%s min_samples=%s",
+                history_path,
+                adaptive.lookback_days,
+                adaptive.min_samples,
+            )
         self._mqtt = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2, client_id="tariff-engine")
         self._mqtt.on_connect = self._on_connect
         self._mqtt.on_message = self._on_message
@@ -83,6 +113,7 @@ class TariffEngine:
             topics.VOLTAGE_V,
             topics.CO2_INTENSITY,
             topics.FOSSIL_FUEL_PCT,
+            topics.STATUS_SLACK_HOURS,
             topics.MODE,
             topics.BID_PRICE,
             topics.USER_AMP_LIMIT,
@@ -103,6 +134,9 @@ class TariffEngine:
                     return
                 if msg.topic == topics.FOSSIL_FUEL_PCT:
                     self.state.fossil_fuel_pct = _optional_float(payload)
+                    return
+                if msg.topic == topics.STATUS_SLACK_HOURS:
+                    self.state.slack_hours = _optional_float(payload)
                     return
 
                 value = _optional_float(payload)
@@ -137,32 +171,89 @@ class TariffEngine:
         if self._program_id is None:
             self._program_id = ensure_program(self._bl)
 
-    def _tick(self) -> None:
-        from datetime import datetime
+    def _save_carbon_history(self) -> None:
+        if self._history is None:
+            return
+        carbon = self.cfg.carbon_price
+        adaptive = carbon.adaptive
+        co2 = carbon.co2_intensity
+        fossil = carbon.fossil_fuel_pct
+        self._history.save(
+            percentile=adaptive.percentile,
+            min_samples=adaptive.min_samples,
+            co2_ceiling=None if co2 is None else co2.threshold,
+            co2_min=None if co2 is None else co2.min_threshold,
+            fossil_ceiling=None if fossil is None else fossil.threshold,
+            fossil_min=None if fossil is None else fossil.min_threshold,
+        )
 
+    def _tick(self) -> None:
         with self.state.lock:
             solar = self.state.solar_kw
             house = self.state.house_load_kw
+            grid_import = self.state.grid_import_kw
+            grid_export = self.state.grid_export_kw
             bid = self.state.bid_price_per_kwh
             user_amps = self.state.user_amp_limit
             voltage = self.state.voltage_v
             co2 = self.state.co2_intensity_g_per_kwh
             fossil = self.state.fossil_fuel_pct
+            slack_hours = self.state.slack_hours
 
+        demand = site_demand_kw(
+            solar_kw=solar, import_kw=grid_import, export_kw=grid_export
+        )
         now = datetime.now().astimezone()
-        import_price, carbon_adder, carbon_reason = effective_import_price(
+        now_mono = time.monotonic()
+        adaptive = self.cfg.carbon_price.adaptive
+
+        if self._history is not None:
+            recorded = self._history.maybe_record(
+                now=now,
+                timezone=self.cfg.timezone,
+                on_peak_start=self.cfg.weekday_on_peak_start,
+                on_peak_end=self.cfg.weekday_on_peak_end,
+                co2=co2,
+                fossil=fossil,
+                sample_interval_sec=adaptive.sample_interval_sec,
+                mono_now=now_mono,
+            )
+            if recorded and now_mono - self._history_save_mono >= 60.0:
+                self._save_carbon_history()
+                self._history_save_mono = now_mono
+
+        thresholds = effective_carbon_thresholds(
+            self.cfg.carbon_price,
+            history=self._history,
+            slack_hours=slack_hours,
+            slack_low_hours=self.cfg.ready_by.cushion_hours,
+        )
+        if (
+            self.cfg.carbon_price.enabled
+            and adaptive.enabled
+            and thresholds.reason == "missing_slack"
+            and now_mono - self._slack_warn_mono >= 60.0
+        ):
+            logger.warning(
+                "carbon adaptive enabled but slack_hours MQTT missing; "
+                "using YAML static thresholds (warn at most once/min)"
+            )
+            self._slack_warn_mono = now_mono
+
+        import_price, import_adder, adder_reason = effective_import_price(
             self.cfg,
             now,
             co2_intensity_g_per_kwh=co2,
             fossil_fuel_pct=fossil,
+            demand_kw=demand,
+            thresholds=thresholds,
         )
-        if self.cfg.carbon_price.enabled and carbon_reason.startswith("unavailable"):
-            now_mono = time.monotonic()
+        if self.cfg.carbon_price.enabled and adder_reason.startswith("unavailable"):
             if now_mono - self._carbon_warn_mono >= 60.0:
                 logger.warning(
                     "carbon_price enabled but Electricity Maps MQTT missing (%s); "
                     "co2=%s fossil%%=%s (retrying; warn at most once/min)",
-                    carbon_reason,
+                    adder_reason,
                     co2,
                     fossil,
                 )
@@ -171,19 +262,20 @@ class TariffEngine:
         limits = self.cfg.limits
         user_kw = (user_amps * voltage) / 1000.0
         evse_kw = (min(limits.evse_max_amps, limits.branch_max_amps) * voltage) / 1000.0
+        headroom = limits.panel_service_headroom_kw
 
         curve = build_supply_curve(
             solar_surplus_kw=surplus,
             export_credit_per_kwh=self.cfg.export_credit_per_kwh,
             import_price_per_kwh=import_price,
-            panel_service_headroom_kw=limits.panel_service_headroom_kw,
+            panel_service_headroom_kw=headroom,
         )
         result = dispatch(
             curve,
             bid_price_per_kwh=bid,
             evse_maximum_kw=evse_kw,
             vehicle_maximum_kw=evse_kw,
-            panel_service_headroom_kw=limits.panel_service_headroom_kw,
+            panel_service_headroom_kw=headroom,
             user_charging_limit_kw=user_kw,
         )
 
@@ -205,24 +297,42 @@ class TariffEngine:
                 "" if result.effective_marginal_price is None else f"{result.effective_marginal_price:.6f}"
             ),
             topics.STATUS_IMPORT_LIMIT_KW: f"{result.import_power_limit_kw:.4f}",
-            topics.STATUS_CARBON_ADDER: f"{carbon_adder:.6f}",
+            topics.STATUS_CARBON_ADDER: f"{import_adder:.6f}",
             topics.STATUS_EFFECTIVE_IMPORT_PRICE: f"{import_price:.6f}",
+            topics.STATUS_EFFECTIVE_CO2_THRESHOLD: _fmt_optional(thresholds.co2_threshold, 1),
+            topics.STATUS_LEARNED_CO2_FLOOR: _fmt_optional(thresholds.learned_co2_floor, 1),
+            topics.STATUS_EFFECTIVE_FOSSIL_THRESHOLD: _fmt_optional(
+                thresholds.fossil_threshold, 2
+            ),
+            topics.STATUS_LEARNED_FOSSIL_FLOOR: _fmt_optional(
+                thresholds.learned_fossil_floor, 2
+            ),
+            topics.STATUS_CARBON_ADAPTIVE_REASON: thresholds.reason,
+            topics.STATUS_CARBON_URGENCY: _fmt_optional(thresholds.urgency, 3),
         }
         for topic, value in status.items():
             self._mqtt.publish(topic, value, qos=0, retain=True)
 
         logger.info(
             "dispatch accepted=%.3f kW price=%s import_limit=%.3f surplus=%.3f "
-            "import_eff=%.3f carbon_adder=%.3f (%s) co2=%s fossil%%=%s",
+            "demand=%.3f import_eff=%.3f adder=%.3f (%s) co2=%s fossil%%=%s "
+            "eff_co2_thr=%s learned_co2=%s urgency=%s adapt=%s samples=%s slack=%s",
             result.accepted_power_kw,
             result.effective_marginal_price,
             result.import_power_limit_kw,
             surplus,
+            demand,
             import_price,
-            carbon_adder,
-            carbon_reason,
+            import_adder,
+            adder_reason,
             co2,
             fossil,
+            thresholds.co2_threshold,
+            thresholds.learned_co2_floor,
+            thresholds.urgency,
+            thresholds.reason,
+            thresholds.sample_count,
+            slack_hours,
         )
 
     def run(self) -> None:
@@ -235,6 +345,8 @@ class TariffEngine:
             except Exception:  # noqa: BLE001
                 logger.exception("tick failed")
             self._stop.wait(self.poll_seconds)
+        if self._history is not None:
+            self._save_carbon_history()
         self._mqtt.loop_stop()
         self._mqtt.disconnect()
 

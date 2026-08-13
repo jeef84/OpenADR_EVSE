@@ -416,6 +416,8 @@ class VenAdapter:
             user_amps=int(site["user_amps"]),
             i_max_amps=self.amps.i_max_amps,
             voltage_v=float(site["voltage"]),
+            on_peak_start=self.cfg.weekday_on_peak_start,
+            on_peak_end=self.cfg.weekday_on_peak_end,
         )
 
     def _target_reached(self, site: dict[str, float | str | bool | time | None]) -> bool:

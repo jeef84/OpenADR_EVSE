@@ -17,9 +17,9 @@ HA telemetry/controls -> Mosquitto -> tariff engine -> VTN -> VEN
                                                    OpenEVSE
 ```
 
-HA (`ha/packages/home_ev_flex.yaml`) publishes site telemetry and user controls.
+HA (`ha/packages/home_ev_flex.yaml`; start from `home_ev_flex_example.yaml`) publishes site telemetry and user controls.
 It does **not** write EVSE amp setpoints. Edit the package `SITE CONFIG` placeholders
-(`sensor.YOUR_SOLAR_PRODUCTION_KW`, grid import/export entity IDs) for your site.
+(`sensor.YOUR_SOLAR_PRODUCTION_KW` in the example package, grid import/export entity IDs) for your site.
 
 If you also run a separate solar-divert controller on another charger, keep those
 control paths isolated so two automations do not fight over the same EVSE.
@@ -35,7 +35,7 @@ control paths isolated so two automations do not fight over the same EVSE.
 
 ### Ready-by-departure overlay
 
-On `economic` / `solar_only`, when remaining energy cannot finish by the daily ready-by clock, VEN force-charges at `user_amp_limit` (ignores price/carbon). Hard amp limits still apply. Once effective SOC reaches the sticky target, those modes command **0 A** (`charge_now` still bypasses the target ceiling).
+On `economic` / `solar_only`, when remaining energy cannot finish in the remaining **off-peak** hours before the **next** daily ready-by clock (tomorrow if today’s time has already passed), VEN force-charges at `user_amp_limit` (ignores bid/carbon). Never forces weekday on-peak grid import (`deadline_reason=force_wait_off_peak`); solar/economic continue until off-peak. Hard amp limits still apply. Once effective SOC reaches the sticky target, those modes command **0 A** (`charge_now` still bypasses the target ceiling).
 
 Sticky site defaults (not per plug-in): battery **74.7 kWh**, target **85%**, ready-by **07:00** local. Per plug-in: parked SOC on `telemetry/soc_pct` (or future OEM). Missing/zero SOC uses assumed **40%** so the overlay stays active.
 
@@ -61,7 +61,7 @@ On re-plug (`openevse/status/connected` false→true), HA adjusts parked SOC fro
 | `home_ev_flex/status/energy_needed_kwh` | VEN → HA | Remaining energy |
 | `home_ev_flex/status/slack_hours` | VEN → HA | Slack before ready-by |
 | `home_ev_flex/status/deadline_force_active` | VEN → HA | `true` when forcing |
-| `home_ev_flex/status/deadline_reason` | VEN → HA | `ok` / `force` / `soc_assumed` / `inactive` |
+| `home_ev_flex/status/deadline_reason` | VEN → HA | `ok` / `force` / `force_wait_off_peak` / `soc_assumed` / `inactive` |
 
 ## Abstract command contract
 
@@ -81,6 +81,8 @@ Bridge hardware mapping (`OPENEVSE_CONTROL`, default `claim`; base topic default
 | ≥ 6 | clear override, then claim `active` + amps | release claim, then override `active` + amps | `$FC` then `$SC {n}` |
 
 Stop always quiets **both** claim and override so a leftover MQTT claim cannot hold the 6 A floor after an override-only clear (the failure mode behind a persistent UI `mqtt` badge at 6 A).
+
+The bridge also **re-asserts** the desired setpoint on vehicle plug-in, and again if measured power stays above `OPENEVSE_UNAUTHORIZED_WATTS` (default 500 W) while FLEX desires 0 A (cooldown `OPENEVSE_REASSERT_SEC`, default 15 s). That covers OpenEVSE resuming Auto after connect while VEN still commands stop.
 
 FLEX also publishes `{base}/divertmode/set` → `1` (Normal) on charge/stop. OpenEVSE **Eco divert** can claim at priority 1100 and beat MQTT (500), which leaves **SETPOINT at ~6 A** while **Max Current** stays 32 A. This OpenEVSE is FLEX-owned; leave gateway divert on Normal / Fast, not Eco. Enphase Soleil can still do solar follow on its own charger.
 
@@ -130,12 +132,23 @@ Each signal is a hard permit gate: at or below threshold → adder $0; above →
 `max_adder_per_kwh`. Solar export-credit blocks are unchanged. Your bid still decides
 acceptance when the gate permits.
 
+When `carbon_price.adaptive.enabled` is true, YAML thresholds are the **ceiling**. The
+tariff engine learns an off-peak p25 floor from a 14-day history and ratchets the
+effective gate toward the ceiling as `status/slack_hours` shrinks. Missing slack or
+cold start (fewer than `min_samples`) keeps the static YAML gate.
+
 Status topics (tariff engine → HA):
 
 | Topic | Meaning |
 | --- | --- |
 | `home_ev_flex/status/carbon_adder_per_kwh` | Active carbon overlay ($/kWh) |
 | `home_ev_flex/status/effective_import_price_per_kwh` | TOU + carbon adder |
+| `home_ev_flex/status/effective_co2_threshold_g_per_kwh` | Active CO2 permit gate |
+| `home_ev_flex/status/learned_co2_floor_g_per_kwh` | Learned clean CO2 floor |
+| `home_ev_flex/status/effective_fossil_threshold_pct` | Active fossil permit gate |
+| `home_ev_flex/status/learned_fossil_floor_pct` | Learned clean fossil floor |
+| `home_ev_flex/status/carbon_adaptive_reason` | `disabled` / `cold_start` / `missing_slack` / `adaptive` |
+| `home_ev_flex/status/carbon_urgency` | Slack urgency 0 (floor) to 1 (ceiling) |
 
 If carbon is enabled and no MQTT reading has arrived, `unavailable_behavior: max_adder`
 (default) applies the configured max adder so the stack does not silently import on a

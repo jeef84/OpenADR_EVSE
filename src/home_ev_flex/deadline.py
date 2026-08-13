@@ -27,10 +27,10 @@ class DeadlineDecision:
     energy_needed_kwh: float
     hours_needed: float
     hours_until_ready_by: float
-    slack_hours: float
+    slack_hours: float  # off-peak hours available minus hours_needed
     force: bool
     soc_assumed: bool
-    reason: str  # inactive | ok | force | soc_assumed
+    reason: str  # inactive | ok | force | force_wait_off_peak | soc_assumed
 
 
 def parse_ready_by_hhmm(value: str) -> time:
@@ -40,6 +40,40 @@ def parse_ready_by_hhmm(value: str) -> time:
     return time(hour=int(hour_s), minute=int(minute_s))
 
 
+def is_weekday_on_peak(
+    now: datetime,
+    *,
+    timezone: str,
+    on_peak_start: time,
+    on_peak_end: time,
+) -> bool:
+    """True during weekday TOU on-peak; weekends are always off-peak."""
+    local = now.astimezone(ZoneInfo(timezone))
+    if local.weekday() >= 5:
+        return False
+    t = local.time()
+    return on_peak_start <= t < on_peak_end
+
+
+def next_ready_by_datetime(
+    now: datetime,
+    ready_by: time,
+    *,
+    timezone: str,
+) -> datetime:
+    """Next calendar occurrence of ready-by (tomorrow if already past today)."""
+    local = now.astimezone(ZoneInfo(timezone))
+    today = local.replace(
+        hour=ready_by.hour,
+        minute=ready_by.minute,
+        second=0,
+        microsecond=0,
+    )
+    if local <= today:
+        return today
+    return today + timedelta(days=1)
+
+
 def hours_until_ready_by_clock(
     now: datetime,
     ready_by: time,
@@ -47,21 +81,71 @@ def hours_until_ready_by_clock(
     timezone: str,
 ) -> float:
     """
-    Hours until today's ready-by clock in site timezone.
+    Hours until the next ready-by clock in site timezone.
 
-    If local time is already past today's ready-by, return 0.0 so unmet energy
-    is treated as overdue (force), not deferred to tomorrow.
+    After today's ready-by has passed, roll forward to tomorrow so daytime
+    plug-ins keep economic/solar slack instead of forcing all afternoon.
     """
     local = now.astimezone(ZoneInfo(timezone))
-    today_deadline = local.replace(
-        hour=ready_by.hour,
-        minute=ready_by.minute,
-        second=0,
-        microsecond=0,
-    )
-    if local <= today_deadline:
-        return max(0.0, (today_deadline - local).total_seconds() / 3600.0)
-    return 0.0
+    target = next_ready_by_datetime(now, ready_by, timezone=timezone)
+    return max(0.0, (target - local).total_seconds() / 3600.0)
+
+
+def off_peak_hours_until(
+    now: datetime,
+    until: datetime,
+    *,
+    timezone: str,
+    on_peak_start: time,
+    on_peak_end: time,
+) -> float:
+    """
+    Force-eligible (off-peak) hours in [now, until).
+
+    Weekends count fully. Weekday on-peak windows do not count toward slack.
+    """
+    local_now = now.astimezone(ZoneInfo(timezone))
+    local_until = until.astimezone(ZoneInfo(timezone))
+    if local_until <= local_now:
+        return 0.0
+
+    total_sec = 0.0
+    cursor = local_now
+    while cursor < local_until:
+        next_midnight = (cursor + timedelta(days=1)).replace(
+            hour=0, minute=0, second=0, microsecond=0
+        )
+        if cursor.weekday() >= 5:
+            chunk_end = min(local_until, next_midnight)
+            total_sec += (chunk_end - cursor).total_seconds()
+            cursor = chunk_end
+            continue
+
+        peak_start_dt = cursor.replace(
+            hour=on_peak_start.hour,
+            minute=on_peak_start.minute,
+            second=0,
+            microsecond=0,
+        )
+        peak_end_dt = cursor.replace(
+            hour=on_peak_end.hour,
+            minute=on_peak_end.minute,
+            second=0,
+            microsecond=0,
+        )
+        t = cursor.time()
+        if t < on_peak_start:
+            chunk_end = min(local_until, peak_start_dt)
+            total_sec += (chunk_end - cursor).total_seconds()
+            cursor = chunk_end
+        elif t < on_peak_end:
+            cursor = min(local_until, peak_end_dt)
+        else:
+            chunk_end = min(local_until, next_midnight)
+            total_sec += (chunk_end - cursor).total_seconds()
+            cursor = chunk_end
+
+    return total_sec / 3600.0
 
 
 def effective_soc_pct(
@@ -123,12 +207,15 @@ def evaluate_deadline(
     user_amps: int,
     i_max_amps: int,
     voltage_v: float,
+    on_peak_start: time = time(11, 0),
+    on_peak_end: time = time(19, 0),
 ) -> DeadlineDecision:
     """
     Decide whether the deadline overlay must force charge.
 
-    Prefer cheap/clean while slack > cushion; force when remaining energy cannot
-    wait until the ready-by clock (or clock already passed with energy still needed).
+    Slack is off-peak hours until the next ready-by minus charge time needed.
+    Force only when that slack is gone **and** the TOU window is currently
+    off-peak (never force grid import during weekday on-peak).
     """
     if not ready_by_enabled:
         return DeadlineDecision(
@@ -158,12 +245,36 @@ def evaluate_deadline(
         user_amps=user_amps, i_max_amps=i_max_amps, voltage_v=voltage_v
     )
     hours_needed = (needed / charge_kw) if charge_kw > 0 and needed > 0 else 0.0
-    hours_until = hours_until_ready_by_clock(now, ready_by_time, timezone=timezone)
-    slack = hours_until - hours_needed
-    force = needed > 0 and slack <= float(cushion_hours)
+    deadline_at = next_ready_by_datetime(now, ready_by_time, timezone=timezone)
+    hours_until = max(
+        0.0,
+        (
+            deadline_at.astimezone(ZoneInfo(timezone))
+            - now.astimezone(ZoneInfo(timezone))
+        ).total_seconds()
+        / 3600.0,
+    )
+    off_peak_h = off_peak_hours_until(
+        now,
+        deadline_at,
+        timezone=timezone,
+        on_peak_start=on_peak_start,
+        on_peak_end=on_peak_end,
+    )
+    slack = off_peak_h - hours_needed
+    need_force = needed > 0 and slack <= float(cushion_hours)
+    on_peak = is_weekday_on_peak(
+        now,
+        timezone=timezone,
+        on_peak_start=on_peak_start,
+        on_peak_end=on_peak_end,
+    )
+    force = need_force and not on_peak
 
     if force:
         reason = "force"
+    elif need_force and on_peak:
+        reason = "force_wait_off_peak"
     elif assumed:
         reason = "soc_assumed"
     else:
@@ -179,22 +290,3 @@ def evaluate_deadline(
         soc_assumed=assumed,
         reason=reason,
     )
-
-
-def next_ready_by_datetime(
-    now: datetime,
-    ready_by: time,
-    *,
-    timezone: str,
-) -> datetime:
-    """Next calendar occurrence of ready-by (tomorrow if already past today)."""
-    local = now.astimezone(ZoneInfo(timezone))
-    today = local.replace(
-        hour=ready_by.hour,
-        minute=ready_by.minute,
-        second=0,
-        microsecond=0,
-    )
-    if local <= today:
-        return today
-    return today + timedelta(days=1)
