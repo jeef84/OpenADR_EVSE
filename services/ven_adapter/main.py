@@ -59,7 +59,8 @@ class LocalState:
     last_soc_for_snapshot: float = 0.0
     # True after retained restore applied or restore window sealed (avoid late overwrite).
     soc_tracking_restored: bool = False
-    # Once effective SOC hits target, stay stopped until parked SOC baseline changes.
+    # Once effective SOC hits target, stay stopped until parked SOC changes or
+    # sticky target rises above effective SOC again.
     target_met: bool = False
     lock: threading.Lock = field(default_factory=threading.Lock)
 
@@ -180,17 +181,42 @@ class VenAdapter:
         self.state.energy_added_since_soc_kwh = added
         self.state.last_soc_for_snapshot = baseline
         self.state.soc_tracking_active = True
-        self.state.target_met = target_met
-        if target_met:
+        # Re-validate against current sticky target. A raised target must reopen
+        # charging; do not invent energy that would falsely meet the new target.
+        rb = self.cfg.ready_by
+        eff, _ = effective_soc_pct(
+            baseline,
+            assumed_soc_pct=rb.assumed_soc_pct,
+            energy_added_kwh=added,
+            battery_capacity_kwh=self.state.battery_capacity_kwh,
+            tracking_active=True,
+        )
+        still_met = (
+            target_met
+            and energy_needed_kwh(
+                effective_soc=eff,
+                target_soc_pct=self.state.target_soc_pct,
+                battery_capacity_kwh=self.state.battery_capacity_kwh,
+            )
+            <= 0.0
+        )
+        self.state.target_met = still_met
+        if still_met:
             floor = self._min_energy_for_target(
                 baseline, self.state.target_soc_pct, self.state.battery_capacity_kwh
             )
             self.state.energy_added_since_soc_kwh = max(added, floor)
+        elif target_met and not still_met:
+            logger.info(
+                "SOC tracking restore cleared target_met (eff=%.1f%% < target=%.1f%%)",
+                eff,
+                self.state.target_soc_pct,
+            )
         logger.info(
             "SOC tracking restored baseline=%.1f%% added=%.3fkWh target_met=%s",
             baseline,
             self.state.energy_added_since_soc_kwh,
-            target_met,
+            self.state.target_met,
         )
 
     def _publish_soc_tracking(self) -> None:
@@ -298,7 +324,16 @@ class VenAdapter:
                         logger.info("SOC MQTT update %.1f%% -> %.1f%%", prev, value)
                     self._maybe_snapshot_soc(value)
                 elif msg.topic == topics.TARGET_SOC_PCT:
+                    prev_target = self.state.target_soc_pct
                     self.state.target_soc_pct = value
+                    # Raising the sticky target must clear a prior ceiling latch.
+                    if value > prev_target and self.state.target_met:
+                        self.state.target_met = False
+                        logger.info(
+                            "target_met cleared after target_soc %.1f%% -> %.1f%%",
+                            prev_target,
+                            value,
+                        )
                 elif msg.topic == topics.BATTERY_CAPACITY_KWH:
                     self.state.battery_capacity_kwh = value
         except Exception:  # noqa: BLE001
@@ -421,36 +456,43 @@ class VenAdapter:
         )
 
     def _target_reached(self, site: dict[str, float | str | bool | time | None]) -> bool:
-        """Stop automatic modes once effective SOC meets sticky target (charge_now bypasses)."""
+        """Stop automatic modes once effective SOC meets sticky target (charge_now bypasses).
+
+        Re-evaluates every tick so a raised target clears a prior latch. The latch
+        still survives restart/rebuild when the current target remains met.
+        """
         if float(site["soc_pct"]) <= 0:
             return False
-        with self.state.lock:
-            if self.state.target_met:
-                return True
         rb = self.cfg.ready_by
+        target = float(site["target_soc_pct"])
+        battery = float(site["battery_capacity_kwh"])
         eff, _ = effective_soc_pct(
             float(site["soc_pct"]),
             assumed_soc_pct=rb.assumed_soc_pct,
             energy_added_kwh=float(site["energy_added_since_soc_kwh"]),
-            battery_capacity_kwh=float(site["battery_capacity_kwh"]),
+            battery_capacity_kwh=battery,
             tracking_active=bool(site["soc_tracking_active"]),
         )
-        reached = (
-            energy_needed_kwh(
-                effective_soc=eff,
-                target_soc_pct=float(site["target_soc_pct"]),
-                battery_capacity_kwh=float(site["battery_capacity_kwh"]),
-            )
-            <= 0.0
-        )
-        if not reached:
-            return False
+        reached = energy_needed_kwh(
+            effective_soc=eff,
+            target_soc_pct=target,
+            battery_capacity_kwh=battery,
+        ) <= 0.0
         with self.state.lock:
+            if not reached:
+                if self.state.target_met:
+                    logger.info(
+                        "target_met cleared: effective=%.1f%% < target=%.1f%%",
+                        eff,
+                        target,
+                    )
+                self.state.target_met = False
+                return False
             # Latch so a restart/rebuild cannot reopen charging for this parked SOC.
             floor = self._min_energy_for_target(
                 self.state.last_soc_for_snapshot or float(site["soc_pct"]),
-                float(site["target_soc_pct"]),
-                float(site["battery_capacity_kwh"]),
+                target,
+                battery,
             )
             self.state.energy_added_since_soc_kwh = max(
                 self.state.energy_added_since_soc_kwh, floor
